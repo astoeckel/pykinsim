@@ -15,10 +15,61 @@
 #   along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import numpy as np
+import sympy as sp
 
 from .errors import *
 from .model import *
 from .utils import *
+from .algebra import *
+
+
+class Symbols:
+    """
+    Class collecting all the symbols used to represent the kinematics and
+    dynamics of the system.
+    """
+    def __init__(self, n_joints, n_cstrs):
+        # Variable representing time
+        self.t = t = sp.Symbol("t")
+
+        # Variables representing the global location of the system relative to the
+        # origin
+        self.x = sp.Function("x")(t)
+        self.y = sp.Function("y")(t)
+        self.z = sp.Function("z")(t)
+        self.origin = sp.Matrix([self.x, self.y, self.z])
+
+        # Variables representing the global velocity of the system
+        self.dx = sp.diff(self.x, t)
+        self.dy = sp.diff(self.y, t)
+        self.dz = sp.diff(self.z, t)
+        self.dorigin = [self.dx, self.dy, self.dz]
+
+        # Variables representing the global acceleration of the system
+        self.ddx = sp.diff(self.dx, t)
+        self.ddy = sp.diff(self.dy, t)
+        self.ddz = sp.diff(self.dz, t)
+        self.ddorigin = [self.ddx, self.ddy, self.ddz]
+
+        # Variables representing the individual joint rotations
+        self.theta = sp.zeros(n_joints, 1)
+        self.dtheta = sp.zeros(n_joints, 1)
+        self.ddtheta = sp.zeros(n_joints, 1)
+        for i in range(n_joints):
+            name = "\\theta_{{{}}}".format(i) if n_joints > 1 else "\\theta"
+            self.theta[i] = sp.Function(name)(t)
+            self.dtheta[i] = sp.diff(self.theta[i], t)
+            self.ddtheta[i] = sp.diff(self.dtheta[i], t)
+
+        # Lagrange multipliers
+        self.lambda_ = [None] * n_cstrs
+        for i in range(n_cstrs):
+            self.lambda_[i] = sp.Symbol("\\lambda_{{{}}}".format(i))
+
+        # Gravity vector
+        self.gx, self.gy, self.gz = sp.symbols("g_x g_y g_z")
+        self.g = sp.Matrix([self.gx, self.gy, self.gz])
+
 
 class State:
     """
@@ -29,9 +80,7 @@ class State:
     Do not manually construct State instances, use the Simulator.initial_state()
     member function instead.
     """
-    def __init__(self, joint_idx_map, loc, rot, t0=0.0):
-        assert len(loc) == len(rot) == 3
-
+    def __init__(self, joint_idx_map, symbolic=False):
         # Copy the given arguments
         self._joint_idx_map = joint_idx_map
         if len(joint_idx_map) == 0:
@@ -40,15 +89,22 @@ class State:
             self._n_joints = max(joint_idx_map.values()) + 1
 
         # State variable keeping track of the current time
-        self._t = t0
+        self._t = 0.0
+
+        # Either use numpy or sympy arrays
+        if symbolic:
+            zeros = lambda l: sp.zeros(l, 1)
+        else:
+            zeros = lambda l: np.zeros(l)
 
         # State variables keeping track of the location and rotation of the root
         # element
-        self._loc = np.copy(loc)
-        self._rot = np.copy(rot)
+        self._loc = zeros(3)
+        self._rot = zeros(3)
 
         # Create arrays holding the joint states and velocities
-        self._state = np.zeros((self._n_joints, 2), dtype=np.float64)
+        self._joint_states = zeros(self._n_joints)
+        self._joint_velocities = zeros(self._n_joints)
 
     @property
     def t(self):
@@ -65,23 +121,31 @@ class State:
     def __len__(self):
         return self._n_joints
 
+    def idx(self, key):
+        return self._joint_idx_map[key]
+
+    @property
+    def states(self):
+        return self._joint_states
+
     def _check_key(self, key):
-        # If the given key is an int, slice, or an array, use the key directly
         if isinstance(key, (int, slice)) or hasattr(key, '__len__'):
             return key
-        elif key in self._joint_idx_map:
-            return self._joint_idx_map[key]
         else:
-            raise KeyError("Key {} not found".format(key))
+            return self.idx(key)
 
     def __getitem__(self, key):
-        return self._state[self._check_key(key)]
+        return self._joint_states[self._check_key(key)]
 
     def __setitem__(self, key, value):
-        self._state[self._check_key(key)] = value
+        self._joint_states[self._check_key(key)] = value
 
     def __iter__(self):
-        return self._state.__iter__()
+        return iter(self._joint_states)
+
+    @property
+    def velocities(self):
+        return self._joint_velocities
 
 
 class Simulator:
@@ -135,8 +199,9 @@ class Simulator:
             rot = np.zeros(3)
         assert len(loc) == 3
         assert len(rot) == 3
-        self._loc = np.copy(loc)
-        self._rot = np.copy(rot)
+
+        self._loc = loc
+        self._rot = rot
 
         # Copy and validate the "chain" object
         self.object_map = {}  # External to internal object map
@@ -149,11 +214,19 @@ class Simulator:
         # Build the spanning tree
         self._tree = self.chain.tree(self.root)
 
+        # Count the number of joints and constraints
+        self._n_joints = sum(1 for _ in self.joints)
+        self._n_cstrs = sum(len(fix.axes) for fix in self.fixtures)
+
         # Build the _joint_idx_map assigning an index to each joint
         self._joint_idx_map = {}
         for i, joint in enumerate(self.joints):
             self._joint_idx_map[joint] = i
             self._joint_idx_map[self.object_map[joint].original] = i
+
+        # Construct the symbols used for evaluating certain expressions
+        # symbolically
+        self._symbols = Symbols(self._n_joints, self._n_cstrs)
 
     @property
     def joints(self):
@@ -164,8 +237,20 @@ class Simulator:
         return filter(lambda x: isinstance(x, Link), self.chain._objs)
 
     @property
+    def masses(self):
+        return filter(lambda x: isinstance(x, Mass), self.chain._objs)
+
+    @property
+    def fixtures(self):
+        return filter(lambda x: isinstance(x, Fixture), self.chain._objs)
+
+    @property
     def point_objects(self):
         return filter(lambda x: isinstance(x, PointObject), self.chain._objs)
+
+    @property
+    def symbols(self):
+        return self._symbols
 
     def __enter__(self):
         return self
@@ -179,11 +264,38 @@ class Simulator:
         """
 
         # Create the state object
-        state = State(self._joint_idx_map, self._loc, self._rot, 0.0)
+        state = State(self._joint_idx_map)
 
-        # Set the initial joint angle
+        # Copy the initial joint angles
         for joint in self.joints:
-            state[joint][0] = joint.theta
+            state[joint] = joint.theta
+
+        # Copy the initial location and rotation of the system
+        for i in range(3):
+            state.loc[i] = self._loc[i]
+            state.rot[i] = self._rot[i]
+
+        return state
+
+    def symbolic_state(self):
+        """
+        Returns a new "symbolic" State object in which each state variable is
+        replaced with a sympy symbol. This can either be used to write out the
+        dynamics of the system.
+        """
+
+        # Create the state object
+        state = State(self._joint_idx_map, symbolic=True)
+
+        # Set the initial joint angles
+        for i in range(len(state)):
+            state.states[i] = self.symbols.theta[i]
+            state.velocities[i] = self.symbols.dtheta[i]
+
+        # Use the symbolic x, y, z, rx, ry, rz variables
+        for i in range(3):
+            state.loc[i] = self.symbols.origin[i]
+            #state.rot[i] = self.symbols.rot[i] # TODO
 
         return state
 
@@ -198,7 +310,9 @@ class Simulator:
     def forward_kinematics(self, state=None, use_external_objects=True):
         """
         Computes the location and orientation of either all point objects or the
-        specified point object.
+        specified point object. If no state is given, computes the forward
+        kinematics symbolically, i.e., as mathematical equations depending on
+        the joint angles.
 
         If an object is returned, returns a transformation matrix for each point
         object in the chain encoding the location and rotation of that point.
@@ -207,8 +321,8 @@ class Simulator:
         ==========
 
         state: The state object determines the configuration of all joints. If
-               None, computes the forward kinematics of the chain in its initial
-               configuration.
+               None, computes the forward kinematics symbolically, where the
+               joint angles are called "theta_1" to "theta_n"
         obj:   The object for which thre transformation should be computed. If
                "None", the transformation will be computed for all point objects
                in the chain. TODO
@@ -219,7 +333,7 @@ class Simulator:
         """
 
         if state is None:
-            state = self.initial_state()
+            state = self.symbolic_state()
 
         # Compute the root object transformation
         loc, rot = state.loc, state.rot
@@ -230,7 +344,7 @@ class Simulator:
 
         # Perform a breadth-first search on the tree to compute all
         # transformations
-        queue = deque((self.root,))
+        queue = deque((self.root, ))
         while len(queue) > 0:
             # Fetch the current node
             cur = queue.popleft()
@@ -239,16 +353,29 @@ class Simulator:
             if not cur in self._tree:
                 continue
 
-            # Iterate over all links and compute the transformation of the
-            # object
+            # Fetch the transformation up to the current point
+            trafo = T[cur]
+
+            # If the current source object is a joint, account for the joint
+            # transformation
+            if isinstance(cur, Joint):
+                theta = state.states[state.idx(cur)]
+                trafo = trafo @ cur.trafo(theta=theta)
+
+            # Iterate over all link targets
             for link in self._tree[cur]:
-                trafo = T[cur]
-                if isinstance(link.src, Joint):
-                    print(state[link.src])
-                    trafo = link.src.trafo(theta=state[link.src][0]) @ trafo
-                trafo = link.trafo() @ trafo
-                T[link.tar] = trafo
+                assert (cur is link.src)
+                T[link.tar] = trafo @ link.trafo()
                 queue.append(link.tar)
+
+        # Simplify the sympy expressions; if the expression is purely numerical,
+        # convert it to a numpy array
+        for key, value in T.items():
+            value = sp.trigsimp(sp.simplify(value, rational=None)).evalf()
+            if all(map(lambda x: isinstance(x, sp.core.numbers.Number),
+                       value)):
+                value = np.array(value, dtype=np.float64)
+            T[key] = value
 
         # Translate the internal clone object references to external references
         if use_external_objects:
@@ -259,8 +386,182 @@ class Simulator:
         else:
             return T
 
+    def lagrangian(self, g=None):
+        """
+        Symbolically computes the Lagrangian L = KE - PE for the given gravity
+        vector (or a generic gravity vector if "g" is set to None).
+
+        Parameters
+        ==========
+
+        g: Gravity vector for which the Lagrangian should be computed. If set to
+           None, uses the symbolic vector [g_x, g_y, g_z].
+        """
+
+        # Use the symbolic gravity vector if None is given
+        if g is None:
+            g = self.symbols.g
+
+        # Symbolically compute the forward kinematics
+        trafos = self.forward_kinematics(use_external_objects=False)
+
+        # Fetch the symbol representing time
+        t = self.symbols.t
+
+        # Compute the kinetic and potential energy terms
+        KE, PE = 0, 0
+        for mass in self.masses:
+            # Fetch the location of the mass in cartesian coordinates
+            x, y, z = trafos[mass][:3, 3]
+
+            # Compute the relative velocities
+            dx, dy, dz = map(lambda e: sp.diff(e, t), trafos[mass][:3, 3])
+
+            # The kinetic energy is just 1/2 m v^2
+            KE += 0.5 * mass.m * (dx**2 + dy**2 + dz**2)
+
+            # The potential energy is F=m<g, x>
+            PE += mass.m * (x * g[0] + y * g[1] + z * g[2])
+
+        # Return the Lagrangian, L = KE - PE
+        return sp.simplify(sp.trigsimp(KE - PE), rational=None)
+
+    def constraints(self):
+        """
+        Converts the fixture objects into a set of constraint equations.
+        """
+
+        # Symbolically compute the forward kinematics
+        trafos = self.forward_kinematics(use_external_objects=False)
+
+        # Compute the forward kinematics for the initial state
+        trafos_init = self.forward_kinematics(state=self.initial_state(),
+                                              use_external_objects=False)
+
+        # For each fixture, add a set of constraints regarding its location
+        Cs = []
+        idx = 0
+        for fixture in self.fixtures:
+            for i, axis in enumerate({"x", "y", "z"}):
+                if not axis in fixture.axes:
+                    continue
+                Cs.append(trafos[fixture][i, 3] - trafos_init[fixture][i, 3])
+                idx += 1
+
+        return Cs
+
+    def dynamics(self, debug=False, g=None):
+        """
+        Returns a list of equations describing the dynamics of the system.
+        """
+
+        # Shorthand for df/dt, d²/d²t and df/dx
+        Dt = lambda f: sp.diff(f, self.symbols.t)
+        Dt2 = lambda f: sp.diff(f, (self.symbols.t, 2))
+        Dx = lambda f, x: sp.diff(f, x)
+
+        # Compute the Lagrangian for an arbitrary gravity vector
+        L = self.lagrangian(g=g)
+
+        # Compute the constraints
+        Cs = self.constraints()
+        C = sum([self.symbols.lambda_[i] * C for i, C in enumerate(Cs)])
+
+        # Collect all state variables
+        vars_ = [*self.symbols.theta, *self.symbols.origin]
+
+        # Compute the energy preservation equation for each variable, then add
+        # the constraints, as well as the second order derivative of the
+        # constraints the set of equations
+        eqns = (
+            [Dx(L, var) - Dt(Dx(L, Dt(var))) + Dx(C, var) for var in vars_] +
+            Cs + [Dt2(C) for C in Cs])
+
+        # Solve for the second-order derivatives, as well as all Lagrange
+        # multpliers
+        tar_vars = [Dt2(var) for var in vars_] + self.symbols.lambda_
+
+        # Sometimes we have additional degrees of freedom in our solution. If
+        # this is the case, we clamp a corresponding number of variables to zero
+        # in the solutions
+        zeros = []
+        while True:
+            if debug:
+                print("SOLVING FOR DYNAMICS")
+                print("====================")
+                print("")
+                print("Solving system")
+                for i, eqn in enumerate(eqns):
+                    print("\t({})\t{}".format(i, eqn))
+                print("For variables")
+                for i, var in enumerate(tar_vars):
+                    print("\t({})\t{}".format(i, var))
+                if len(zeros) > 0:
+                    print("With superfluous DoFs eliminated by setting")
+                    for i, var in enumerate(zeros):
+                        print("\t({})\t{} = 0".format(i, var))
+
+            # Actually perform the solving process
+            solns = sp.solve(eqns, tar_vars, rational=None, dict=True)
+
+            # Abort if we're not able to find a solution for this system
+            if (solns is None) or (len(solns) == 0):
+                raise ValidationError("Cannot solve for the system dynamics", self)
+
+            # If "solns" is an array, just use the first solution. Note: I'm not
+            # aware of this ever happening, but technically sympy can return a
+            # list of solutions
+            if isinstance(solns, list):
+                if len(solns) > 1:
+                    if debug: # TODO: Warning?
+                        print("Multiple possible solutions; using first one")
+                solns = solns[0]
+
+            if debug:
+                print("Solution")
+                for i, (key, value) in enumerate(solns.items()):
+                    print("\t({})\t{}\t=\t{}".format(i, key, value))
+                print()
+
+            # The returned solutions should now be a dictionary
+            assert isinstance(solns, dict)
+
+            # If the length of the solutions dictionary is smaller than the
+            # total number of variables, this means that we have additional
+            # degrees of freedom (this for example happens if a part of the
+            # kinematic chain is weightless)
+            if len(solns) < len(tar_vars):
+                dof = len(tar_vars) - len(solns)
+                for i in range(dof):
+                    # Extract the first target variable; we'll just assume that
+                    # this variable is zero. Note that this will set the joint
+                    # angles to zero first, in contrast to sympy, which
+                    # arbitrarily selects variables with additional degrees of
+                    # freedom.
+                    zero_var = tar_vars[0]
+                    for i, eqn in enumerate(eqns):
+                        eqns[i] = eqn.subs(zero_var, 0)
+                    tar_vars = tar_vars[1:]
+                    zeros.append(zero_var)
+
+                # Perform another iteration
+                continue
+
+            # We're done, exit the loop!
+            break
+
+        # Add the variables in the "zeros" list to the result
+        for var in zeros:
+            solns[var] = 0.0
+
+        # Return the solutions
+        return solns
+
     def _visualize_raw(self, state=None):
-        # Compute the forward kinematics for the given state
+        # Compute the forward kinematics for the given state. Pass the
+        # non-symbolic "initial_state" instance.
+        if state is None:
+            state = self.initial_state()
         T = self.forward_kinematics(state, use_external_objects=False)
 
         raw = []
@@ -285,59 +586,25 @@ class Simulator:
                 "rot": None,
             })
 
+        # Draw the coordinate system at each point
+        for pobj, trafo in T.items():
+            for i, ax in enumerate(np.eye(3, 3)):
+                src = trafo[:3, 3]
+                tar = np.array((trafo @ trans(*ax)), dtype=np.float64)[:3, 3]
+                raw.append({
+                    "type": "axis",
+                    "class": "xyz"[i],
+                    "src": src,
+                    "tar": tar,
+                })
+
         return raw
-
-    def _visualize_matplotlib(self, raw, ax):
-        import matplotlib.pyplot as plt
-        from mpl_toolkits.mplot3d import Axes3D
-
-        # Fetch the figure and the axis object
-        if ax is None:
-            fig = plt.figure()
-            ax = fig.add_subplot(111, projection='3d')
-        else:
-            fig = ax.get_figure()
-
-        # Iterate over the drawing commands and draw them
-        for cmd in raw:
-            if cmd["type"] == "link":
-                ax.plot(
-                    [cmd["src"][0], cmd["tar"][0]],
-                    [cmd["src"][1], cmd["tar"][1]],
-                    [cmd["src"][2], cmd["tar"][2]],
-                    linestyle="-",
-                    color="k"
-                )
-            elif cmd["type"] == "object":
-                styles = {
-                    "fixture": {
-                        "marker": "+",
-                        "color": "k"
-                    },
-                    "joint": {
-                        "marker": "o",
-                        "color": "b"
-                    },
-                    "mass": {
-                        "marker": "s",
-                        "color": "r"
-                    },
-                }
-                ax.plot(
-                    [cmd["loc"][0]],
-                    [cmd["loc"][1]],
-                    [cmd["loc"][2]],
-                    **styles[cmd["class"]]
-                )
-
-        return fig, ax
 
     def visualize(self, state=None, kind="matplotlib", ax=None):
         """
         Creates a visualisation of the kinematic chain in the given state.
 
         kind: The kind of visualisation to perform. Possible values are
-
               "raw": Returns a list of "drawing commands"
         """
 
@@ -349,5 +616,6 @@ class Simulator:
         if kind == "raw":
             return raw
         elif kind == "matplotlib":
-            return self._visualize_matplotlib(raw, ax)
+            from .visualization import _visualize_matplotlib
+            return _visualize_matplotlib(raw, ax)
 

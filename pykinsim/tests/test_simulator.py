@@ -15,11 +15,13 @@
 #   along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import numpy as np
+import sympy as sp
 
 import pytest
 import pykinsim as pks
 
 from pykinsim.simulator import State
+
 
 def test_state():
     a, b, c = object(), object(), object()
@@ -28,27 +30,18 @@ def test_state():
         b: 1,
         c: 2,
     }
-    loc = (0, 1, 2)
-    rot = (3, 4, 5)
-    t0 = 1.0
-    state = State(joint_idx_map, loc, rot, 1.0)
+    state = State(joint_idx_map)
 
     assert len(state) == 3
-    assert len(state[0]) == 2
-    assert all(state[0] == 0.0)
+    assert all(map(lambda x: x == 0.0, state))
 
     for i in range(3):
-        state[i, 0] = i
-        state[i, 1] = i + 1
+        state[i] = i
 
-    assert state[a][0] == 0
-    assert state[a][1] == 1
+    assert state[a] == 0
+    assert state[b] == 1
+    assert state[c] == 2
 
-    assert state[b][0] == 1
-    assert state[b][1] == 2
-
-    assert state[c][0] == 2
-    assert state[c][1] == 3
 
 def test_simulator_error_disconnected_components_1():
     with pks.Chain() as chain:
@@ -89,6 +82,7 @@ def test_simulator_error_cyclic_1():
         with pks.Simulator(chain, m1) as sim:
             pass
 
+
 def test_simulator_error_cyclic_2():
     with pks.Chain() as chain:
         m1 = pks.Mass()
@@ -127,9 +121,9 @@ def test_simulator_forward_kinematics_1():
         m1 = pks.Mass()
 
     with pks.Simulator(chain, m1) as sim:
-        trafos = sim.forward_kinematics()
+        trafos = sim.forward_kinematics(sim.initial_state())
 
-    assert len(trafs) == 1
+    assert len(trafos) == 1
     assert m1 in trafos
     assert np.all(trafos[m1] == np.eye(4))
 
@@ -138,10 +132,61 @@ def test_simulator_forward_kinematics_2():
     with pks.Chain() as chain:
         m1 = pks.Mass()
         m2 = pks.Mass()
+        pks.Link(m1, m2)
 
     with pks.Simulator(chain, m1) as sim:
-        trafos = sim.forward_kinematics()
+        trafos = sim.forward_kinematics(sim.initial_state())
+
+    assert len(trafos) == 2
 
     assert m1 in trafos
     assert np.all(trafos[m1] == np.eye(4))
+
+    assert m2 in trafos
+    assert np.all(trafos[m2] == (np.eye(4) + np.eye(4, 4, 3)))
+
+
+def test_simulator_forward_kinematics_symbolic():
+    l1, l2 = sp.symbols("\\ell_1 \\ell_2")
+
+    with pks.Chain() as chain:
+        f1 = pks.Fixture()
+        j1 = pks.Joint()
+        m1 = pks.Mass()
+        m2 = pks.Mass()
+
+        pks.Link(f1, j1, l=0.0)
+        pks.Link(j1, m1, l=l1)
+        pks.Link(m1, m2, l=l2)
+
+    with pks.Simulator(chain, f1) as sim:
+        trafos = sim.forward_kinematics()
+
+    theta = sim.symbols.theta[0]
+    x, z = sim.symbols.x, sim.symbols.z
+
+    assert sp.simplify(x + l1 * sp.cos(theta) - trafos[m1][0, 3]) == 0
+    assert sp.simplify(z - l1 * sp.sin(theta) - trafos[m1][2, 3]) == 0
+    assert sp.simplify(x + (l1 + l2) * sp.cos(theta) - trafos[m2][0, 3]) == 0
+    assert sp.simplify(z - (l1 + l2) * sp.sin(theta) - trafos[m2][2, 3]) == 0
+
+
+def test_simulator_dynamics_pendulum():
+    with pks.Chain() as chain:
+        f1 = pks.Fixture()
+        j1 = pks.Joint()
+        m1 = pks.Mass()
+
+        pks.Link(f1, j1, l=0.0)
+        pks.Link(j1, m1, l=1.0)
+
+    with pks.Simulator(chain, f1) as sim:
+        dynamics = sim.dynamics(g=(0.0, 0.0, 9.81))
+
+    theta = sim.symbols.theta[0]
+
+    assert sim.symbols.ddtheta[0] in dynamics
+    ddtheta =  dynamics[sim.symbols.ddtheta[0]]
+
+    assert sp.simplify(9.81 * sp.cos(theta) - ddtheta) == 0
 

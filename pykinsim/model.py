@@ -13,6 +13,7 @@
 #
 #   You should have received a copy of the GNU Affero General Public License
 #   along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 """
 This file contains all the data objects holding information about the model
 built by the user. These objects are merely data containers and do not contain
@@ -20,7 +21,7 @@ any simulation logic. The "Simulator" class must be used to compile a model
 into an actual simulation.
 """
 
-import numpy as np
+import sympy as sp
 import re
 from collections import deque
 
@@ -31,6 +32,7 @@ _thread_local = threading.local()
 
 from .errors import *
 from .utils import *
+from .algebra import *
 
 
 class Labeled:
@@ -200,7 +202,7 @@ class Chain(Labeled):
         new and old objects in the object_map dictionary
         """
         def deepcopy(obj, object_map):
-            if isinstance(obj, LinkDirection):
+            if isinstance(obj, (LinkDirection, sp.Symbol, sp.MatrixSymbol, sp.Function)):
                 return obj
             elif isinstance(obj, list):
                 return [deepcopy(value, object_map) for value in obj]
@@ -311,7 +313,7 @@ class Chain(Labeled):
         for pobj in filter(lambda x: isinstance(x, PointObject), self._objs):
             if not pobj in visited:
                 raise DisconnectedChainError(
-                    "The point object {} is not---directly, or indirectly---connected to the root node {}"
+                    "The point object {} is not connected to the root node {}"
                     .format(pobj, root), pobj)
 
         # Replace the (link, inv) tuples in the tree with Link instances
@@ -439,9 +441,9 @@ class Link(Object):
 
     def trafo(self):
         if self.direction is Forward:
-            return trans(x=self.l) @ rot_z(self.rz) @ rot_y(self.ry)
+            return rot_y(self.ry) @ rot_z(self.rz) @ trans(x=self.l)
         elif self.direction is Backward:
-            return rot_y(-self.ry) @ rot_z(-self.rz) @ trans(x=-self.l)
+            return trans(x=-self.l) @ rot_z(-self.rz) @ rot_y(-self.ry)
 
 
     def coerce(self):
@@ -457,13 +459,9 @@ class Link(Object):
             raise ValidationError("Invalid link target", self)
 
         # Make sure l, ry, rz are floats
-        self.l = float(self.l)
-        self.ry = float(self.ry)
-        self.rz = float(self.rz)
-
-        # Normalise all angles to [-pi, pi]
-        self.ry = norm_angle(self.ry)
-        self.rz = norm_angle(self.rz)
+        self.l = scalar(self.l)
+        self.ry = scalar(self.ry)
+        self.rz = scalar(self.rz)
 
         # Make sure the direction is either Forward or Backward
         if not ((self.direction is Forward) or (self.direction is Backward)):
@@ -531,7 +529,7 @@ class Joint(PointObject):
                 .format(self.axis, self))
 
         # Make sure theta is valid
-        self.theta = float(self.theta)
+        self.theta = scalar(self.theta)
 
 
 class Mass(PointObject):
@@ -551,7 +549,7 @@ class Mass(PointObject):
         super().coerce()
 
         # Make sure the given mass is a float
-        self.m = float(self.m)
+        self.m = scalar(self.m)
 
         # Make sure masses are not negative. Physics gets all weird with negative
         # masses.

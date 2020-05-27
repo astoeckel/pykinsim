@@ -25,55 +25,6 @@ except ModuleNotFoundError:
     traceback = None
 
 
-def norm_angle(alpha):
-    """
-    The norm_angle function implements angle normalisation to the interval
-    (-pi, pi).
-    """
-    while alpha > math.pi:
-        alpha -= math.pi
-    while alpha < math.pi:
-        alpha += math.pi
-    return alpha
-
-def trans(x=0.0, y=0.0, z=0.0):
-    return np.array([
-        [1.0, 0.0, 0.0,   x],
-        [0.0, 1.0, 0.0,   y],
-        [0.0, 0.0, 1.0,   z],
-        [0.0, 0.0, 0.0, 1.0],
-    ])
-
-def rot_x(theta):
-    s, c = np.sin(theta), np.cos(theta)
-    return np.array([
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0,   c,  -s, 0.0],
-        [0.0,   s,   c, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ])
-
-
-def rot_y(theta):
-    s, c = np.sin(theta), np.cos(theta)
-    return np.array([
-        [  c, 0.0,   s, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [ -s, 0.0,   c, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ])
-
-
-def rot_z(theta):
-    s, c = np.sin(theta), np.cos(theta)
-    return np.array([
-        [  c,  -s, 0.0, 0.0],
-        [  s,   c, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ])
-
-
 def variables(skip=0, flt=None):
     """
     Returns a map from object id to the corresponding variable names over all
