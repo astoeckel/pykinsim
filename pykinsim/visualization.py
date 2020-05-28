@@ -15,32 +15,64 @@
 #   along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 
-def _visualize_matplotlib(raw, ax):
+class MatplotlibVisHandle:
+    def __init__(self, fig, ax):
+        self.fig = fig
+        self.ax = ax
+        self.objs = {}
+
+def _visualize_matplotlib(raw, handle, ax):
     import matplotlib.pyplot as plt
     from mpl_toolkits.mplot3d import Axes3D
 
     # Fetch the figure and the axis object
-    if ax is None:
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
+    if handle is None:
+        if ax is None:
+            fig = plt.figure()
+            ax = fig.add_subplot(111, projection='3d')
+        else:
+            fig = ax.get_figure()
+
+        # Initial axis setup
+        ax.set_xlim(-1, 1)
+        ax.set_ylim(-1, 1)
+        ax.set_zlim(-1, 1)
+        ax.set_xlabel("$x$")
+        ax.set_ylabel("$y$")
+        ax.set_zlabel("$z$")
+        ax.grid(False)
+        ax.set_axis_off()
+        ax.set_frame_on(False)
+
+
+        handle = MatplotlibVisHandle(fig, ax)
     else:
-        fig = ax.get_figure()
+        fig, ax = handle.fig, handle.ax
 
     # Iterate over the drawing commands and draw them
+    idx = [0]
+    def obj(cbck):
+        idx[0] += 1
+        if not idx[0] in handle.objs:
+            handle.objs[idx[0]] = cbck()
+        return handle.objs[idx[0]]
+
     for cmd in raw:
         if cmd["type"] == "link":
-            ax.plot([cmd["src"][0], cmd["tar"][0]],
-                    [cmd["src"][1], cmd["tar"][1]],
-                    [cmd["src"][2], cmd["tar"][2]],
-                    linestyle="-",
-                    color="k")
+            line, = obj(lambda: ax.plot([], [], [], linestyle="-", color="k"))
+            line.set_data_3d(
+                [cmd["src"][0], cmd["tar"][0]],
+                [cmd["src"][1], cmd["tar"][1]],
+                [cmd["src"][2], cmd["tar"][2]]
+            )
         elif cmd["type"] == "axis":
             colors = {"x": "r", "y": "g", "z": "b"}
-            ax.quiver(*cmd["src"],
-                      *(cmd["tar"] - cmd["src"]),
-                      linestyle="-",
-                      color=colors[cmd["class"]],
-                      length=0.25, normalize=True)
+            line, = obj(lambda: ax.plot([], [], [], linestyle="-", color=colors[cmd["class"]],))
+            line.set_data_3d(
+                [cmd["src"][0], cmd["tar"][0]],
+                [cmd["src"][1], cmd["tar"][1]],
+                [cmd["src"][2], cmd["tar"][2]]
+            )
         elif cmd["type"] == "object":
             styles = {
                 "fixture": {
@@ -56,8 +88,8 @@ def _visualize_matplotlib(raw, ax):
                     "color": "r"
                 },
             }
-            ax.plot([cmd["loc"][0]], [cmd["loc"][1]], [cmd["loc"][2]],
-                    **styles[cmd["class"]])
+            marker, = obj(lambda: ax.plot([], [], [], **styles[cmd["class"]]))
+            marker.set_data_3d([cmd["loc"][0]], [cmd["loc"][1]], [cmd["loc"][2]])
 
-    return fig, ax
+    return handle
 

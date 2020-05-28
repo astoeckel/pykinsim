@@ -17,10 +17,15 @@
 import numpy as np
 import sympy as sp
 
+import time # XXX
+
 from .errors import *
 from .model import *
 from .utils import *
 from .algebra import *
+
+# Default gravity vector
+DEFAULT_GRAVITY = (0.0, 0.0, 9.81)
 
 
 class Symbols:
@@ -29,6 +34,9 @@ class Symbols:
     dynamics of the system.
     """
     def __init__(self, n_joints, n_cstrs):
+        # Handy aliases
+        n, m = n_joints, n_cstrs
+
         # Variable representing time
         self.t = t = sp.Symbol("t")
 
@@ -55,20 +63,50 @@ class Symbols:
         self.theta = sp.zeros(n_joints, 1)
         self.dtheta = sp.zeros(n_joints, 1)
         self.ddtheta = sp.zeros(n_joints, 1)
-        for i in range(n_joints):
-            name = "\\theta_{{{}}}".format(i) if n_joints > 1 else "\\theta"
+        for i in range(n):
+            name = "θ{{{}}}".format(i + 1) if n_joints > 1 else "θ"
             self.theta[i] = sp.Function(name)(t)
             self.dtheta[i] = sp.diff(self.theta[i], t)
             self.ddtheta[i] = sp.diff(self.dtheta[i], t)
 
         # Lagrange multipliers
         self.lambda_ = [None] * n_cstrs
-        for i in range(n_cstrs):
-            self.lambda_[i] = sp.Symbol("\\lambda_{{{}}}".format(i))
+        for i in range(m):
+            self.lambda_[i] = sp.Symbol("λ{}".format(i + 1))
 
         # Gravity vector
-        self.gx, self.gy, self.gz = sp.symbols("g_x g_y g_z")
+        self.gx, self.gy, self.gz = sp.symbols("gx gy gz")
         self.g = sp.Matrix([self.gx, self.gy, self.gz])
+
+        # Free-standing symbols substituted for the functions above
+        self.var_origin = list(sp.symbols("x y z"))
+        self.var_dorigin = list(sp.symbols("dx dy dz"))
+        self.var_ddorigin = list(sp.symbols("ddx ddy ddz"))
+        self.var_theta = [sp.Symbol("θ{}".format(i)) for i in range(n)]
+        self.var_dtheta = [sp.Symbol("dθ{}".format(i)) for i in range(n)]
+        self.var_ddtheta = [sp.Symbol("ddθ{}".format(i)) for i in range(n)]
+
+        # Substitution table mapping the functions over time defined above onto
+        # the free symbols below
+        self._subs = []
+        for i in range(3):
+            self._subs.append((self.ddorigin[i], self.var_ddorigin[i]))
+            self._subs.append((self.dorigin[i], self.var_dorigin[i]))
+            self._subs.append((self.origin[i], self.var_origin[i]))
+        for i in range(n):
+            self._subs.append((self.ddtheta[i], self.var_ddtheta[i]))
+            self._subs.append((self.dtheta[i], self.var_dtheta[i]))
+            self._subs.append((self.theta[i], self.var_theta[i]))
+
+
+    def subs(self, expr):
+        """
+        Substitutes functions over time, such as x(t) with free-standing
+        expressions.
+        """
+        for key, value in self._subs:
+            expr = expr.subs(key, value)
+        return expr
 
 
 class State:
@@ -100,6 +138,7 @@ class State:
         # State variables keeping track of the location and rotation of the root
         # element
         self._loc = zeros(3)
+        self._dloc = zeros(3)
         self._rot = zeros(3)
 
         # Create arrays holding the joint states and velocities
@@ -113,6 +152,10 @@ class State:
     @property
     def loc(self):
         return self._loc
+
+    @property
+    def dloc(self):
+        return self._dloc
 
     @property
     def rot(self):
@@ -147,9 +190,32 @@ class State:
     def velocities(self):
         return self._joint_velocities
 
+    @property
+    def vec(self):
+        """
+        Returns a vectorised version of the state
+        """
+        return np.concatenate((self._loc, self._joint_states, self._dloc, self._joint_velocities))
+
+    @vec.setter
+    def vec(self, x):
+        n = self._n_joints
+        i0, i1, i2, i3, i4 = 0, 3, 3 + n, 6 + n, 6 + 2 * n
+        self._loc[...] = x[i0:i1]
+        self._joint_states[...] = x[i1:i2]
+        self._dloc[...] = x[i2:i3]
+        self._joint_velocities = x[i3:i4]
+
 
 class Simulator:
-    def __init__(self, chain, root, loc=None, rot=None):
+    def __init__(self,
+                 chain,
+                 root,
+                 loc=None,
+                 rot=None,
+                 g=(0.0, 0.0, 9.81),
+                 lazy=True,
+                 debug=False):
         """
         Creates a new Simulator object for the given chain. The "root" object
         is the object relative to which the location of all other objects is
@@ -177,6 +243,15 @@ class Simulator:
                root object is located at (0, 0, 0).
         rot:   An optional three-tuple describing the rotation of the root
                element in the world coordinate space.
+        g:     Gravity vector to use in the simulation. The default value
+               roughly corresponds to earth's gravity near earth's surface.
+               Per default, the gravity vector is aligned with the z-axis.
+        lazy:  If true, the model dynamics will only be computed once step()
+               is called the first time. Otherwise, the model dynamics will
+               be computed as a part of the constructor, which may take quite
+               a while.
+        debug: If true displays debug messages for some operations, such as
+               solving for dynamics.
         """
 
         # Make sure that "chain" and "root" have the right type
@@ -200,8 +275,13 @@ class Simulator:
         assert len(loc) == 3
         assert len(rot) == 3
 
+        # Copy the locations/vectors
         self._loc = loc
         self._rot = rot
+        self._g = g
+
+        # Copy the "debug" falg
+        self._debug = bool(debug)
 
         # Copy and validate the "chain" object
         self.object_map = {}  # External to internal object map
@@ -227,6 +307,91 @@ class Simulator:
         # Construct the symbols used for evaluating certain expressions
         # symbolically
         self._symbols = Symbols(self._n_joints, self._n_cstrs)
+
+        # Compute the model dynamics
+        self._dyn_f_A, self._dyn_f_b, self._dyn_f_subs, self._dyn_T = self.dynamics()
+#        self._dynamics = None
+#        self._dynamics_fn = None
+#        if not lazy:
+#            self._compute_dynamics()
+        self._t_solve = 0.0
+        self._n_solve = 0
+        self._t_eval = 0.0
+        self._n_eval = 0
+
+    def _solve_dynamics(self, x):
+        """
+        Used internally to compute the accelerations updating the model state.
+        """
+
+        # Compute some handy indices used below
+        n = self._n_joints
+        i0, i1, i2 = 0, 3 + n, 6 + 2 * n # i1:i2 --> velocities in x
+        j0, j1 = 0, 3 + n                # j0:j1 --> accls. in the lin. sys.
+
+        t0 = time.process_time()
+
+        # Compute the linear system for the given state
+        A = self._dyn_f_A(*x)
+        b = self._dyn_f_b(*x)
+
+        # Compute the variable subtitutions. These are Lagrange multipliers or
+        # accelerations that were determined to have a fixed value
+        subs = self._dyn_f_subs(*x)
+
+        t1 = time.process_time()
+
+        # Solve for the accelerations and Lagrange multipliers
+        soln = np.linalg.lstsq(A, b, rcond=1e-6)[0]
+
+        t2 = time.process_time()
+
+        # The resulting accelerations are the sum of the substitutions and the
+        # the solution to the linear system computed above.
+        ddx = (self._dyn_T @ soln + subs)[:, 0]
+
+#        print(self._dyn_T, soln, subs)
+
+        self._t_eval += (t1 - t0)
+        self._t_solve += (t2 - t1)
+        self._n_eval += 1
+        self._n_solve += 1
+
+        # Return the state update vector
+        return np.concatenate((x[i1:i2], ddx[j0:j1]))
+
+
+#    def _compute_dynamics(self):
+#        """
+#        Used internally to solve for the model dynamics and to setup the
+#        "dynamics function" used in "step"
+#        """
+
+#        # Solve for the dynamics
+#        if self._dynamics is None:
+#            self._dynamics = self.dynamics()
+
+#        # Use the dynamics to create the dynamics function
+#        if self._dynamics_fn is None:
+#            self._dynamics_fn = self.make_dynamics_function(self._dynamics)
+
+    @staticmethod
+    def substitute(eqn, subs):
+        for key, value in subs:
+            eqn = eqn.subs(key, value)
+        return eqn
+
+    @property
+    def loc(self):
+        return self._loc
+
+    @property
+    def rot(self):
+        return self._rot
+
+    @property
+    def g(self):
+        return self._g
 
     @property
     def joints(self):
@@ -299,13 +464,54 @@ class Simulator:
 
         return state
 
-    def step(self, state=None, g=None, dt=1e-3):
+    def run(self, T, state=None, dt=1e-3):
+        """
+        Advances the simulation up to T in timesteps smaller or equal to dt.
+
+        Parameters
+        ==========
+
+        T:     The time in seconds to run the simulation for.
+        state: The state object containing the current joint angles and
+               velocities. If no state object is given (i.e., this is set to
+               None), creates a new State object. Note that the State object
+               must not be symbolic.
+        dt:    The maximum timestep used in the evaluation.
+        """
+        while T > 0:
+            cur_dt = min(T, dt)  # Step exactly to T
+            state = self.step(state, cur_dt)
+            T -= cur_dt
+        return state
+
+    def step(self, state=None, dt=1e-3):
         """
         Advances the simulation by one timestep from the given state. If no
         state is given, a new State() object corresponding to the initial state
         is generated.
+
+        Parameters
         """
-        pass
+
+        # Fetch the initial state
+        if state is None:
+            state = self.initial_state()
+
+        # Fetch the number of state variables
+        n = self._n_joints
+
+        # Create the state vector
+        x = state.vec
+
+        # Perform a single Runge-Kutta 4 (RK4) step
+        k1 = self._solve_dynamics(x)
+        k2 = self._solve_dynamics(x + dt * k1 / 2.0)
+        k3 = self._solve_dynamics(x + dt * k2 / 2.0)
+        k4 = self._solve_dynamics(x + dt * k3)
+        state.vec = x + dt * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
+        state._t += dt
+
+        return state
 
     def forward_kinematics(self, state=None, use_external_objects=True):
         """
@@ -371,7 +577,7 @@ class Simulator:
         # Simplify the sympy expressions; if the expression is purely numerical,
         # convert it to a numpy array
         for key, value in T.items():
-            value = sp.trigsimp(sp.simplify(value, rational=None)).evalf()
+            value = value.evalf()
             if all(map(lambda x: isinstance(x, sp.core.numbers.Number),
                        value)):
                 value = np.array(value, dtype=np.float64)
@@ -418,13 +624,76 @@ class Simulator:
             dx, dy, dz = map(lambda e: sp.diff(e, t), trafos[mass][:3, 3])
 
             # The kinetic energy is just 1/2 m v^2
-            KE += 0.5 * mass.m * (dx**2 + dy**2 + dz**2)
+            KE += sp.trigsimp(0.5 * mass.m * (dx**2 + dy**2 + dz**2))
 
             # The potential energy is F=m<g, x>
             PE += mass.m * (x * g[0] + y * g[1] + z * g[2])
 
+        # Simplify the equations
+        KE = sp.simplify(KE, rational=None)
+        PE = sp.simplify(PE, rational=None)
+
+        print("Kinetic energy: ", KE)
+        print("Potential energy: ", PE)
+
         # Return the Lagrangian, L = KE - PE
-        return sp.simplify(sp.trigsimp(KE - PE), rational=None)
+        return KE - PE
+
+#    def make_lagrangian_loss_functions(self, lagrangian, constraints):
+#        """
+#        Returns two functions: a function for computing the total quadratic
+#        deviation from zero of Lagrange's equations for the given model
+#        configuration and accelerations, as well as the gradient of that
+#        function for the given accelerations.
+
+#        This is used for numerically solving the Lagrangian.
+#        """
+
+#        from sympy.utilities.lambdify import lambdify
+
+#        # Alias for the symbols, lagrangian and constraints
+#        S, L, Cs = self.symbols, lagrangian, constraints
+
+#        # Shorthand for df/dt, d²/d²t and df/dx
+#        Dt = lambda f: sp.diff(f, self.symbols.t)
+#        Dt2 = lambda f: sp.diff(f, (self.symbols.t, 2))
+#        Dx = lambda f, x: sp.diff(f, x)
+
+#        # Sum the constraints
+#        C = sum([self.symbols.lambda_[i] * C for i, C in enumerate(Cs)])
+
+#        # Collect all state variables
+#        vars_ = [*self.symbols.theta, *self.symbols.origin]
+
+#        # Compute the energy preservation equation for each variable, then add
+#        # the constraints, as well as the second order derivative of the
+#        # constraints the set of equations
+#        eqns = (
+#            [Dx(L, var) - Dt(Dx(L, Dt(var))) + Dx(C, var)
+#             for var in vars_] + Cs + [Dt2(C) for C in Cs])
+
+#        # Compute the squared loss function given these equations
+#        loss = sum(map(lambda x: x**2, eqns))
+
+#        # Substitute the free-standing variables in
+#        loss = S.subs_funs(loss)
+
+#        # Make a "lambdified" version of the loss function
+#        args = (S.var_ddorigin + S.var_ddtheta +
+#                S.lambda_ + S.var_origin + S.var_theta +
+#                S.var_dorigin + S.var_dtheta)
+#        f_loss = lambdify(args, loss)
+
+#        # Make a version of the loss function returning the gradient of
+#        # ddorigin, ddtheta, and lambda_
+#        dvars_ = S.var_ddorigin + S.var_ddtheta + S.lambda_
+
+#        jacobi = [sp.diff(loss, dvar) for dvar in dvars_]
+
+#        f_jacobi = lambdify(args, jacobi)
+#        f_hesse = lambdify(args, hesse)
+
+#        return f_loss, f_jacobi, f_hesse
 
     def constraints(self):
         """
@@ -442,7 +711,7 @@ class Simulator:
         Cs = []
         idx = 0
         for fixture in self.fixtures:
-            for i, axis in enumerate({"x", "y", "z"}):
+            for i, axis in enumerate(["x", "y", "z"]):
                 if not axis in fixture.axes:
                     continue
                 Cs.append(trafos[fixture][i, 3] - trafos_init[fixture][i, 3])
@@ -450,112 +719,291 @@ class Simulator:
 
         return Cs
 
-    def dynamics(self, debug=False, g=None):
+    def dynamics(self, g=None, debug=None):
         """
         Returns a list of equations describing the dynamics of the system.
+
+        Parameters
+        ==========
+
+        g:     The gravity vector. If None is given, uses the value for "g"
+               passed to the constructor of the simulator object.
+        debug: Determines whether debug messages should be shown. If "None",
+               uses the value for "debug" passed to the constructor of the
+               simulator object.
         """
+
+        from sympy.utilities.lambdify import lambdify
+
+        # Load the default values for some values
+        if g is None:
+            g = self._g
+        if debug is None:
+            debug = self._debug
 
         # Shorthand for df/dt, d²/d²t and df/dx
         Dt = lambda f: sp.diff(f, self.symbols.t)
         Dt2 = lambda f: sp.diff(f, (self.symbols.t, 2))
         Dx = lambda f, x: sp.diff(f, x)
 
+        S = self.symbols
+
         # Compute the Lagrangian for an arbitrary gravity vector
         L = self.lagrangian(g=g)
 
         # Compute the constraints
         Cs = self.constraints()
-        C = sum([self.symbols.lambda_[i] * C for i, C in enumerate(Cs)])
+        C = sum([S.lambda_[i] * C for i, C in enumerate(Cs)])
 
-        # Collect all state variables
-        vars_ = [*self.symbols.theta, *self.symbols.origin]
+        # Collect all state variables; these are the variables we're
+        # differentiating over when computing the Lagrange equations
+        vars_ = [*S.origin, *S.theta]
+
+        # Collect all target variables; these are the variables we're trying
+        # to solve for
+        tars = [S.subs(x) for x in ([Dt2(var) for var in vars_] + S.lambda_)]
+        tars_idcs = {x: i for i, x in enumerate(tars)}
+        tars_keys = set(tars)
+
+        # Compute the set of Lagrange equations. Add the constraints, as well as
+        # the second order derivative of the constraint. Each entry in the
+        # "eqns"
+        eqns = [sp.expand(S.subs(x)) for x in
+                ([Dx(L, var) - Dt(Dx(L, Dt(var))) + Dx(C, var)
+                 for var in vars_] + Cs + [Dt2(C) for C in Cs])]
+
+        # The resulting system is linear in the accelerations and Lagrange
+        # multipliers (but not in the state variables). Hence, we arrange the
+        # Lagrange equations in a linear equation of the form Ax = b, 
+        # where A is a (m x n) matrix (m is the number of equations, n is the
+        # number of target variables).
+        m, n = len(eqns), len(tars)
+
+        # Fill the A and b matrices.
+        A, b = sp.zeros(m, n), sp.zeros(m, 1)
+        for i, eqn in enumerate(eqns):
+            # Split each equation into the underlying additive terms
+            terms = eqn.args if isinstance(eqn, sp.Add) else [eqn]
+            for j, term in enumerate(terms):
+                # Discard terms containing incredibly small factors
+                if (isinstance(term, sp.Mul) and isinstance(term.args[0], sp.Number) and
+                        (abs(term.args[0]) < 1e-12)):
+                    if debug:
+                        print("Discarding term \"{}\"".format(term))
+                    continue
+                # Find the target variables contained within this term
+                tar = term.free_symbols & tars_keys
+                if len(tar) == 0:
+                    # No target variable in the term, subtract the term from
+                    # the right-hand side of the linear system
+                    b[i] -= term
+                elif len(tar) == 1:
+                    # There is exactly one target variable in the term. Add this
+                    # term to the correct spot in A and substitute it with one.
+                    tar = next(iter(tar))
+                    A[i, tars_idcs[tar]] += term.subs(tar, 1)
+                else:
+                    # Ugh. We have a problem. Multiple target variables are in
+                    # this (multiplicative) term. This means that the system is
+                    # not solveable as a linear system of equations.
+                    # TODO: Can this happen at all?
+                    raise ValidationError("Resulting system is not linear in the accelerations and Lagrange multipliers!", self)
+
+        # Only use equations with at least one non-zero column in the A matrix
+        keep_row_idcs, subs = [], [None] * n
+        for i in range(m):
+            # Compute the non-zero column indices
+            nz_col_idcs = list(filter(lambda j: A[i, j] != 0.0, range(n)))
+            if len(nz_col_idcs) > 1:
+                # If there is more than one non-zero column index, there's
+                # nothing we can do for now to simplify the system any further
+                keep_row_idcs.append(i)
+                continue
+            elif len(nz_col_idcs) == 0:
+                # If there are no non-zero entries in this row, just eliminate
+                # the entire row
+                if debug:
+                    print("Eliminating equation \"{} = 0\" from the system.".format(b[i]))
+                continue
+
+            # There is exactly one non-zero column j in this row. Thus, we know
+            # that the value of the corresponding variable is b[i] / A[i, j].
+            # We can thus elminate this column from the system (in a separate
+            # step below).
+            j = nz_col_idcs[0]
+            subs[j] = sp.simplify(b[i] / A[i, j], rational=None)
+            if debug:
+                print("Substituting \"{}\" with \"{}\"".format(tars[j], subs[j]))
+
+        # Eliminate rows from A and b
+        A = A[keep_row_idcs, :]
+        b = b[keep_row_idcs, :]
+
+        # Eliminate columns from A, compute a linear mapping T that re-maps the
+        # non-eliminated state variables onto their right index.
+        keep_col_idcs = []
+        for j in range(n):
+            # If we're not doing a substitution for this variable, keep the
+            # corresponding column in A
+            if subs[j] is None:
+                subs[j] = 0.0
+                keep_col_idcs.append(j)
+                continue
+
+            # Since we know that value of the variable corresponding to column
+            # j, we can move the contents of column j to the rhs
+            for i in range(len(keep_row_idcs)):
+                b[i] -= A[i, j] * subs[j]
+        A = A[:, keep_col_idcs]
+        T = np.eye(n)[:, keep_col_idcs]
+        print(keep_col_idcs, T, subs)
+
+        # Simplify all cells
+        m, n = A.shape
+        for i in range(m):
+            b[i] = sp.simplify(b[i], rational=None)
+            for j in range(n):
+                A[i, j] = sp.simplify(A[i, j], rational=None)
+                print("A[{}, {}]".format(i, j), A[i, j])
+            print("b[{}]".format(i), b[i])
+
+        # Turn A, b in functions depending on the state vector
+        args = S.var_origin + S.var_theta + S.var_dorigin + S.var_dtheta
+        f_A = sp.lambdify(args, A, modules=["numpy"])
+        f_b = sp.lambdify(args, b, modules=["numpy"])
+        f_subs = sp.lambdify(args, subs, modules=["numpy"])
+
+        return f_A, f_b, f_subs, T
+
+#        tar_vars = [Dt2(var) for var in vars_] + self.symbols.lambda_
 
         # Compute the energy preservation equation for each variable, then add
         # the constraints, as well as the second order derivative of the
         # constraints the set of equations
-        eqns = (
-            [Dx(L, var) - Dt(Dx(L, Dt(var))) + Dx(C, var) for var in vars_] +
-            Cs + [Dt2(C) for C in Cs])
+#        eqns = (
+#            [Dx(L, var) - Dt(Dx(L, Dt(var))) + Dx(C, var)
+#             for var in vars_] + Cs + [Dt2(C) for C in Cs])
 
         # Solve for the second-order derivatives, as well as all Lagrange
         # multpliers
-        tar_vars = [Dt2(var) for var in vars_] + self.symbols.lambda_
+ #       tar_vars = [Dt2(var) for var in vars_] + self.symbols.lambda_
 
-        # Sometimes we have additional degrees of freedom in our solution. If
-        # this is the case, we clamp a corresponding number of variables to zero
-        # in the solutions
-        zeros = []
-        while True:
-            if debug:
-                print("SOLVING FOR DYNAMICS")
-                print("====================")
-                print("")
-                print("Solving system")
-                for i, eqn in enumerate(eqns):
-                    print("\t({})\t{}".format(i, eqn))
-                print("For variables")
-                for i, var in enumerate(tar_vars):
-                    print("\t({})\t{}".format(i, var))
-                if len(zeros) > 0:
-                    print("With superfluous DoFs eliminated by setting")
-                    for i, var in enumerate(zeros):
-                        print("\t({})\t{} = 0".format(i, var))
+        # Substitute the functions with symbols
+#        eqns = [self.symbols.subs_funs(eqn) for eqn in eqns]
+#        tar_vars = [self.symbols.subs_funs(tar_var) for tar_var in tar_vars]
 
-            # Actually perform the solving process
-            solns = sp.solve(eqns, tar_vars, rational=None, dict=True)
+#        # Sometimes we have additional degrees of freedom in our solution. If
+#        # this is the case, we clamp a corresponding number of variables to zero
+#        # in the solutions
+#        zeros = []
+#        while True:
+#            if debug:
+#                print("SOLVING FOR DYNAMICS")
+#                print("====================")
+#                print("")
+#                print("Solving system")
+#                for i, eqn in enumerate(eqns):
+#                    print("\t({})\t{}".format(i, eqn))
+#                print("For variables")
+#                for i, var in enumerate(tar_vars):
+#                    print("\t({})\t{}".format(i, var))
+#                if len(zeros) > 0:
+#                    print("With superfluous DoFs eliminated by setting")
+#                    for i, var in enumerate(zeros):
+#                        print("\t({})\t{} = 0".format(i, var))
 
-            # Abort if we're not able to find a solution for this system
-            if (solns is None) or (len(solns) == 0):
-                raise ValidationError("Cannot solve for the system dynamics", self)
+#            # Actually perform the solving process
+#            solns = sp.solve(eqns, tar_vars, rational=None, dict=True, simplify=True)
 
-            # If "solns" is an array, just use the first solution. Note: I'm not
-            # aware of this ever happening, but technically sympy can return a
-            # list of solutions
-            if isinstance(solns, list):
-                if len(solns) > 1:
-                    if debug: # TODO: Warning?
-                        print("Multiple possible solutions; using first one")
-                solns = solns[0]
+#            # Abort if we're not able to find a solution for this system
+#            if (solns is None) or (len(solns) == 0):
+#                raise ValidationError("Cannot solve for the system dynamics",
+#                                      self)
 
-            if debug:
-                print("Solution")
-                for i, (key, value) in enumerate(solns.items()):
-                    print("\t({})\t{}\t=\t{}".format(i, key, value))
-                print()
+#            # If "solns" is an array, just use the first solution. Note: I'm not
+#            # aware of this ever happening, but technically sympy can return a
+#            # list of solutions
+#            if isinstance(solns, list):
+#                if len(solns) > 1:
+#                    if debug:  # TODO: Warning?
+#                        print("Multiple possible solutions; using first one")
+#                solns = solns[0]
 
-            # The returned solutions should now be a dictionary
-            assert isinstance(solns, dict)
+#            if debug:
+#                print("Solution")
+#                for i, (key, value) in enumerate(solns.items()):
+#                    print("\t({})\t{}\t=\t{}".format(i, key, value))
+#                print()
 
-            # If the length of the solutions dictionary is smaller than the
-            # total number of variables, this means that we have additional
-            # degrees of freedom (this for example happens if a part of the
-            # kinematic chain is weightless)
-            if len(solns) < len(tar_vars):
-                dof = len(tar_vars) - len(solns)
-                for i in range(dof):
-                    # Extract the first target variable; we'll just assume that
-                    # this variable is zero. Note that this will set the joint
-                    # angles to zero first, in contrast to sympy, which
-                    # arbitrarily selects variables with additional degrees of
-                    # freedom.
-                    zero_var = tar_vars[0]
-                    for i, eqn in enumerate(eqns):
-                        eqns[i] = eqn.subs(zero_var, 0)
-                    tar_vars = tar_vars[1:]
-                    zeros.append(zero_var)
+#            # The returned solutions should now be a dictionary
+#            assert isinstance(solns, dict)
 
-                # Perform another iteration
-                continue
+#            # If the length of the solutions dictionary is smaller than the
+#            # total number of variables, this means that we have additional
+#            # degrees of freedom (this for example happens if a part of the
+#            # kinematic chain is weightless)
+#            if len(solns) < len(tar_vars):
+#                dof = len(tar_vars) - len(solns)
+#                for i in range(dof):
+#                    # Extract the first target variable; we'll just assume that
+#                    # this variable is zero. Note that this will set the joint
+#                    # angles to zero first, in contrast to sympy, which
+#                    # arbitrarily selects variables with additional degrees of
+#                    # freedom.
+#                    zero_var = tar_vars[0]
+#                    for i, eqn in enumerate(eqns):
+#                        eqns[i] = eqn.subs(zero_var, 0)
+#                    tar_vars = tar_vars[1:]
+#                    zeros.append(zero_var)
 
-            # We're done, exit the loop!
-            break
+#                # Perform another iteration
+#                continue
 
-        # Add the variables in the "zeros" list to the result
-        for var in zeros:
-            solns[var] = 0.0
+#            # We're done, exit the loop!
+#            break
 
-        # Return the solutions
-        return solns
+#        # Add the variables in the "zeros" list to the result
+#        for var in zeros:
+#            solns[var] = sp.sympify(0.0)
+
+#        # Return the solutions
+#        return solns
+
+#    def make_dynamics_function(self, dynamics):
+#        """
+#        Returns a function taking a 2*n dimensional vector as an input (where
+#        n is the number of joints), corresponding to the states and velocities.
+#        The function then returns a vector of the same size corresponding to the
+#        differential of these quantities.
+#        """
+
+#        from sympy.utilities.lambdify import lambdify
+
+#        # Collect the parameters of the model (origin, velocity of the origin,
+#        # current angle locations, velocities of the angle locations), as well
+#        # as the resulting accelerations
+#        S = self.symbols
+#        args = S.var_origin + S.var_theta + S.var_dorigin + S.var_dtheta
+#        as_ = S.var_ddorigin + S.var_ddtheta
+
+#        # Substitute all variables
+#        exprs = {}
+#        for key, value in dynamics.items():
+#            exprs[S.subs(key)] = S.subs(value)
+
+#        # Create the functions describing the accelerations
+#        f_as_ = lambdify(args, [exprs[a] for a in as_], modules="numpy")
+
+#        # Compute some handy indices indicating what is stored where
+#        n = self._n_joints
+#        i0, i1, i2 = 0, 3 + n, 6 + 2 * n
+#        j0, j1 = 0, 3 + n
+
+#        def dx(x):
+#            ddx = f_as_(*x)
+#            return np.concatenate((x[i1:i2], ddx[j0:j1]))
+
+#        return dx
 
     def _visualize_raw(self, state=None):
         # Compute the forward kinematics for the given state. Pass the
@@ -589,27 +1037,32 @@ class Simulator:
         # Draw the coordinate system at each point
         for pobj, trafo in T.items():
             for i, ax in enumerate(np.eye(3, 3)):
+                l = 0.1
                 src = trafo[:3, 3]
                 tar = np.array((trafo @ trans(*ax)), dtype=np.float64)[:3, 3]
                 raw.append({
                     "type": "axis",
                     "class": "xyz"[i],
                     "src": src,
-                    "tar": tar,
+                    "tar": src * (1.0 - l) + tar * l,
                 })
 
         return raw
 
-    def visualize(self, state=None, kind="matplotlib", ax=None):
+    def visualize(self, state=None, kind="matplotlib", handle=None, ax=None):
         """
         Creates a visualisation of the kinematic chain in the given state.
 
         kind: The kind of visualisation to perform. Possible values are
+
               "raw": Returns a list of "drawing commands"
+
+        handle: An object returned by a previous call to "visualize". If set,
+              this will update the previously drawn diagram.
         """
 
         # Make sure the parameters are correct
-        assert kind in {"raw", "matplotlib"}
+        assert (kind in {"raw", "matplotlib"})
         assert (ax is None) or (kind == "matplotlib")
 
         raw = self._visualize_raw(state)
@@ -617,5 +1070,5 @@ class Simulator:
             return raw
         elif kind == "matplotlib":
             from .visualization import _visualize_matplotlib
-            return _visualize_matplotlib(raw, ax)
+            return _visualize_matplotlib(raw, handle, ax)
 
