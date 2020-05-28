@@ -532,8 +532,7 @@ class Simulator:
                 T[link.tar] = trafo @ link.trafo()
                 queue.append(link.tar)
 
-        # Simplify the sympy expressions; if the expression is purely numerical,
-        # convert it to a numpy array
+        # If a sympy expression is purely numerical, convert it to a numpy array
         for key, value in T.items():
             value = value.evalf()
             if all(map(lambda x: isinstance(x, sp.core.numbers.Number),
@@ -582,14 +581,10 @@ class Simulator:
             dx, dy, dz = map(lambda e: sp.diff(e, t), trafos[mass][:3, 3])
 
             # The kinetic energy is just 1/2 m v^2
-            KE += sp.trigsimp(0.5 * mass.m * (dx**2 + dy**2 + dz**2))
+            KE += 0.5 * mass.m * (dx**2 + dy**2 + dz**2)
 
             # The potential energy is F=m<g, x>
             PE += mass.m * (x * g[0] + y * g[1] + z * g[2])
-
-        # Simplify the equations
-        KE = sp.simplify(KE, rational=None)
-        PE = sp.simplify(PE, rational=None)
 
         # Return the Lagrangian, L = KE - PE
         return KE - PE
@@ -731,7 +726,7 @@ class Simulator:
             # We can thus elminate this column from the system (in a separate
             # step below).
             j = nz_col_idcs[0]
-            subs[j] = sp.simplify(b[i] / A[i, j], rational=None)
+            subs[j] = b[i] / A[i, j]
             logger.debug("Substituting \"%s\" with \"%s\"", tars[j], subs[j])
 
         # Eliminate rows from A and b
@@ -839,12 +834,16 @@ class Simulator:
         """
         Creates a visualisation of the kinematic chain in the given state.
 
+        Parameters
+        ==========
+
         kind: The kind of visualisation to perform. Possible values are
-
-              "raw": Returns a list of "drawing commands"
-
+                "raw": Returns a list of "drawing commands"
+                "matplotlib": Uses matplotlib to plot a 3D visualization
         handle: An object returned by a previous call to "visualize". If set,
               this will update the previously drawn diagram.
+        ax:   When using matplotlib, specifies the axis into which the
+              visualization should be drawn.
         """
 
         # Make sure the parameters are correct
