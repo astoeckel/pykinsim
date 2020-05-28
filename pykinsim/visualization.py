@@ -43,6 +43,7 @@ def _visualize_matplotlib(raw, handle, ax):
         ax.grid(False)
         ax.set_axis_off()
         ax.set_frame_on(False)
+        ax.view_init(elev=0.0, azim=-90.0)
 
 
         handle = MatplotlibVisHandle(fig, ax)

@@ -147,7 +147,7 @@ def test_simulator_forward_kinematics_2():
 
 
 def test_simulator_forward_kinematics_symbolic():
-    l1, l2 = sp.symbols("\\ell_1 \\ell_2")
+    l1, l2 = sp.symbols("l1 l2")
 
     with pks.Chain() as chain:
         f1 = pks.Fixture()
@@ -171,7 +171,7 @@ def test_simulator_forward_kinematics_symbolic():
     assert sp.simplify(z - (l1 + l2) * sp.sin(theta) - trafos[m2][2, 3]) == 0
 
 
-def test_simulator_dynamics_pendulum():
+def test_simulator_dynamics_symbolic():
     with pks.Chain() as chain:
         f1 = pks.Fixture()
         j1 = pks.Joint()
@@ -181,12 +181,13 @@ def test_simulator_dynamics_pendulum():
         pks.Link(j1, m1, l=1.0)
 
     with pks.Simulator(chain, f1) as sim:
-        dynamics = sim.dynamics(g=(0.0, 0.0, 9.81))
+        dynamics = sim.dynamics(g=(0.0, 0.0, 9.81), symbolic=True)
+        print(dynamics)
 
-    theta = sim.symbols.theta[0]
+    theta = sim.symbols.var_theta[0]
 
-    assert sim.symbols.ddtheta[0] in dynamics
-    ddtheta =  dynamics[sim.symbols.ddtheta[0]]
+    assert sim.symbols.var_ddtheta[0] in dynamics
+    ddtheta =  dynamics[sim.symbols.var_ddtheta[0]]
 
     assert sp.simplify(9.81 * sp.cos(theta) - ddtheta) == 0
 
