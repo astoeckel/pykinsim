@@ -32,4 +32,4 @@ from .model import (
 from .simulator import (
     State, Simulator, )
 
-
+from . import visualization

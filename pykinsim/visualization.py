@@ -94,3 +94,47 @@ def _visualize_matplotlib(raw, handle, ax):
 
     return handle
 
+def animate(sim, fps=30.0, dt=1e-2, T=1000.0):
+    # Import the required matplotlib packages
+    import matplotlib.animation as animation
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+
+    # Import stuff for printing and keeping track of time
+    import time, sys
+
+    # Target FPS
+    interval = 1.0 / fps
+
+    # Visualise the initial state
+    state = sim.initial_state()
+    vis_handle = sim.visualize(state)
+
+    # Define the "animate" function that needs to be passed to matplotlin
+    t_tot = [0.0]
+    def animate(i):
+        # Run the actual simulation
+        t0 = time.process_time()
+        sim.run(interval, state, dt=dt)
+        t1 = time.process_time()
+
+        # Print some statistics about how long it takes to compute the
+        # dynamics
+        t_tot[0] += (t1 - t0)
+        sys.stdout.write(
+            "\rFrame time: {:0.1f}ms    \t Avg. step time: {:0.1f}µs    ".
+            format((t1 - t0) * 1e3, t_tot[0] / state.step_count * 1e6))
+
+        # Update the view
+        sim.visualize(state, handle=vis_handle)
+
+    # Run the animation
+    ani = animation.FuncAnimation(vis_handle.fig,
+                                  animate,
+                                  range(int(T / interval)),
+                                  interval=1000.0 * interval)
+
+    # Show the window
+    plt.show()
+    print()
+
