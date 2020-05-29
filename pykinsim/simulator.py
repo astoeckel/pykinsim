@@ -725,8 +725,8 @@ class Simulator:
         tars_keys = set(tars)
 
         # Compute the set of Lagrange equations. Add the constraints, as well as
-        # the second order derivative of the constraint. Each entry in the
-        # "eqns"
+        # the second order derivative of the constraint. Each entry "x" in the
+        # "eqns" list corresponds to an equation of the form "x = 0".
         eqns = [
             sp.expand(S.subs(x)) for x in
             ([Dx(L, var) - Dt(Dx(L, Dt(var))) + Dx(C, var)
