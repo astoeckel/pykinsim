@@ -1,4 +1,4 @@
-PyKinSim -- Python Kinematic Chain Simulator
+PyKinSim ‒ Python Kinematic Chain Simulator
 ============================================
 
 ![Visualization of the Pendulum example above](doc/pendulum_example.svg)
