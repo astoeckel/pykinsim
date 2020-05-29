@@ -7,7 +7,7 @@ mechanics to accurately simulate the effects of gravity, as well as the preserva
 of momentum. It features a simple API for the description and simulation of
 kinematic chains.
 
-## 🚀 Example
+## Example
 
 ![Visualization of the Pendulum example above](doc/pendulum_example.svg)
 
