@@ -1,6 +1,8 @@
 PyKinSim -- Python Kinematic Chain Simulator
 ============================================
 
+![Visualization of the Pendulum example above](doc/pendulum_example.svg)
+
 *PyKinSim* is a Python library for the simulation of rigid kinematic chains,
 such as pendulums, robotic arms, or skeletons. *PyKinSim* uses Lagrangian
 mechanics to accurately simulate the effects of gravity, as well as preservation
@@ -36,8 +38,7 @@ with pks.Simulator(chain, root=f1) as sim:
         vis.fig.savefig("pendulum_{}.svg".format(i), bbox_inches="tight", transparent=True)
 ```
 
-Executing this will result in roughly the following visualisation (pictures combined for clarity):
-![Visualization of the Pendulum example above]((/doc/pendulum_example.svg)
+Executing this will result in roughly result in the picture displayed above (the individual plots were combined for clarity).
 
 ## Features
 
