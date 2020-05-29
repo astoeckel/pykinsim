@@ -14,6 +14,7 @@
 #   You should have received a copy of the GNU Affero General Public License
 #   along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import numpy as np
 
 class MatplotlibVisHandle:
     def __init__(self, fig, ax):
@@ -21,7 +22,7 @@ class MatplotlibVisHandle:
         self.ax = ax
         self.objs = {}
 
-def _visualize_matplotlib(raw, handle, ax):
+def _visualize_matplotlib(raw, handle, ax, aabb):
     import matplotlib.pyplot as plt
     from mpl_toolkits.mplot3d import Axes3D
 
@@ -34,12 +35,16 @@ def _visualize_matplotlib(raw, handle, ax):
             fig = ax.get_figure()
 
         # Initial axis setup
-        ax.set_xlim(-1, 1)
-        ax.set_ylim(-1, 1)
-        ax.set_zlim(-1, 1)
+        ax.set_proj_type('ortho')
+        ax.set_xlim(*aabb[0])
+        ax.set_ylim(*aabb[1])
+        ax.set_zlim(*aabb[2])
         ax.set_xlabel("$x$")
         ax.set_ylabel("$y$")
         ax.set_zlabel("$z$")
+        ax.set_xticks(np.arange(np.floor(aabb[0][0]), np.ceil(aabb[0][1]) + 0.1, 1))
+        ax.set_yticks(np.arange(np.floor(aabb[1][0]), np.ceil(aabb[1][1]) + 0.1, 1))
+        ax.set_zticks(np.arange(np.floor(aabb[2][0]), np.ceil(aabb[2][1]) + 0.1, 1))
         ax.grid(False)
         ax.set_axis_off()
         ax.set_frame_on(False)
@@ -49,6 +54,13 @@ def _visualize_matplotlib(raw, handle, ax):
         handle = MatplotlibVisHandle(fig, ax)
     else:
         fig, ax = handle.fig, handle.ax
+
+    # Get the axis x-limit, y-limit, and z-limit
+    aabb_min = np.array([ax.get_xlim()[0], ax.get_ylim()[0], ax.get_zlim()[0]])
+    aabb_max = np.array([ax.get_xlim()[1], ax.get_ylim()[1], ax.get_zlim()[1]])
+
+    marker_size = 25 / np.max(aabb_max - aabb_min)
+    axis_size = 0.125 * (aabb_max - aabb_min)
 
     # Iterate over the drawing commands and draw them
     idx = [0]
@@ -69,28 +81,26 @@ def _visualize_matplotlib(raw, handle, ax):
         elif cmd["type"] == "axis":
             colors = {"x": "r", "y": "g", "z": "b"}
             line, = obj(lambda: ax.plot([], [], [], linestyle="-", color=colors[cmd["class"]],))
-            line.set_data_3d(
-                [cmd["src"][0], cmd["tar"][0]],
-                [cmd["src"][1], cmd["tar"][1]],
-                [cmd["src"][2], cmd["tar"][2]]
-            )
+            p, q = cmd["src"], cmd["src"] + axis_size * cmd["dir"]
+            line.set_data_3d([p[0], q[0]], [p[1], q[1]], [p[2], q[2]])
         elif cmd["type"] == "object":
             styles = {
                 "fixture": {
                     "marker": "+",
-                    "color": "k"
+                    "color": "k",
                 },
                 "joint": {
                     "marker": "o",
-                    "color": "b"
+                    "color": "b",
                 },
                 "mass": {
                     "marker": "s",
-                    "color": "r"
+                    "color": "r",
                 },
             }
             marker, = obj(lambda: ax.plot([], [], [], **styles[cmd["class"]]))
             marker.set_data_3d([cmd["loc"][0]], [cmd["loc"][1]], [cmd["loc"][2]])
+            marker.set_markersize(marker_size)
 
     return handle
 

@@ -905,6 +905,44 @@ class Simulator:
     # Visualization                                                           #
     ###########################################################################
 
+    def _visualize_estimate_bounding_box(self, seed=58382, radius=True):
+        """
+        Used internally to estimate the axis aligned bounding box of the system.
+        This is used to automatically scale the display area to fit the entire
+        model.
+        """
+
+        # Randomly generate states and compute the axis-aligned bounding-box
+        aabb = np.array((
+            (np.inf, -np.inf),
+            (np.inf, -np.inf),
+            (np.inf, -np.inf)))
+
+        state = self.initial_state()
+        rng = np.random.RandomState(seed)
+        for _ in range(100):
+            for i in range(len(state)):
+                state[i] = rng.uniform(-np.pi, np.pi)
+            trafos = self._kinematics(*state.static_vec)
+            for T in trafos.values():
+                aabb[:, 0] = np.minimum(T[i, 3], aabb[:, 0])
+                aabb[:, 1] = np.maximum(T[i, 3], aabb[:, 0])
+
+        # Round the result for more stability
+        ext = np.maximum(1.0, aabb[:, 1] - aabb[:, 0])
+        aabb[:, 0] = np.floor((aabb[:, 0] - 0.1 * ext) * 10.0) / 10.0
+        aabb[:, 1] = np.ceil((aabb[:, 1] + 0.1 * ext) * 10.0) / 10.0
+
+        # If "radius" is True, use the maximum extent in one dimension to
+        # set the extent of the others.
+        if radius:
+            center = 0.5 * (aabb[:, 0] + aabb[:, 1])
+            max_ext = np.max(ext)
+            aabb[:, 0] = center - 0.5 * max_ext
+            aabb[:, 1] = center + 0.5 * max_ext
+
+        return aabb
+
     def _visualize_raw(self, state=None):
         """
         Uses internally to create the raw drawing commands.
@@ -951,12 +989,12 @@ class Simulator:
                     "type": "axis",
                     "class": "xyz"[i],
                     "src": src,
-                    "tar": src * (1.0 - l) + tar * l,
+                    "dir": tar - src,
                 })
 
         return raw
 
-    def visualize(self, state=None, kind="matplotlib", handle=None, ax=None):
+    def visualize(self, state=None, kind="matplotlib", handle=None, ax=None, aabb=None):
         """
         Creates a visualisation of the kinematic chain in the given state.
 
@@ -965,21 +1003,31 @@ class Simulator:
 
         kind: The kind of visualisation to perform. Possible values are
                 "raw": Returns a list of "drawing commands"
-                "matplotlib": Uses matplotlib to plot a 3D visualization
+                "matplotlib": Uses matplotlib to plot a 3D visualization.
         handle: An object returned by a previous call to "visualize". If set,
               this will update the previously drawn diagram.
         ax:   When using matplotlib, specifies the axis into which the
               visualization should be drawn.
+        aabb:   The axis-aligned bounding box that should be used to set the
+                display area. A triple of (min, max) tuples (one for each
+                spatial dimension).
         """
 
         # Make sure the parameters are correct
         assert (kind in {"raw", "matplotlib"})
         assert (ax is None) or (kind == "matplotlib")
+        assert (aabb is None) or (kind != "raw")
 
+        # We always need the raw visualisation data
         raw = self._visualize_raw(state)
         if kind == "raw":
             return raw
-        elif kind == "matplotlib":
+
+        # Estimate the bounding box if none is given
+        if (aabb is None) and (handle is None):
+            aabb = self._visualize_estimate_bounding_box()
+
+        if kind == "matplotlib":
             from .visualization import _visualize_matplotlib
-            return _visualize_matplotlib(raw, handle, ax)
+            return _visualize_matplotlib(raw, handle, ax, aabb)
 
