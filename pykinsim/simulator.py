@@ -198,10 +198,23 @@ class State:
     @property
     def vec(self):
         """
-        Returns a vectorised version of the state
+        Returns a vectorised version of the state, including both the static
+        state and the velocities. This vector is passed to the dynamics
+        function returned by "Simulator.dynamics()", as well as
+        "Simulator.state_differential()".
         """
         return np.concatenate((self._loc, self._joint_states, self._dloc,
                                self._joint_velocities))
+
+    @property
+    def static_vec(self):
+        """
+        Returns a vectorised version of the static state, i.e., only the
+        origin and the joint states. This does *not* include the velocities.
+        The resulting vector is passed to the kinematics function returned
+        by "Simulator.kinematics()".
+        """
+        return np.concatenate((self._loc, self._joint_states))
 
     @vec.setter
     def vec(self, x):
@@ -214,6 +227,12 @@ class State:
 
 
 class Simulator:
+    """
+    The Simulator class is capable of simulating a kinematics chain. It uses
+    sympy to algebraically solve for the dynamics of the kinematics chain and
+    provides functions that facilitate the physical simulation of the
+    kinematics chain.
+    """
     def __init__(self, chain, root, loc=None, rot=None, g=(0.0, 0.0, 9.81)):
         """
         Creates a new Simulator object for the given chain. The "root" object
@@ -298,45 +317,12 @@ class Simulator:
         # symbolically
         self._symbols = Symbols(self._n_joints, self._n_cstrs)
 
-        # Compute the model dynamics
-        self._dynamics = self.dynamics()
+        # Compile the dynamics into a function (aka the dynamics descriptor)
+        self._dynamics = self.dynamics(return_function=True)
 
-    def _solve_dynamics(self, x):
-        """
-        Used internally to compute the accelerations updating the model state.
-        """
-
-        # Unpack the dynamics descriptor
-        f_A, f_b, f_subs, T = self._dynamics
-
-        # Compute some handy indices used below
-        n = self._n_joints
-        i0, i1, i2 = 0, 3 + n, 6 + 2 * n  # i1:i2 --> velocities in x
-        j0, j1 = 0, 3 + n  # j0:j1 --> accls. in the lin. sys.
-
-        # Compute the linear system for the given state
-        A = f_A(*x)
-        b = f_b(*x)
-
-        # Compute the variable subtitutions. These are Lagrange multipliers or
-        # accelerations that were determined to have a fixed value
-        subs = f_subs(*x)
-
-        # Solve for the accelerations and Lagrange multipliers
-        soln = np.linalg.lstsq(A, b, rcond=1e-6)[0]
-
-        # The resulting accelerations are the sum of the substitutions and the
-        # the solution to the linear system computed above.
-        ddx = (T @ soln + subs)[:, 0]
-
-        # Return the state update vector
-        return np.concatenate((x[i1:i2], ddx[j0:j1]))
-
-    @staticmethod
-    def substitute(eqn, subs):
-        for key, value in subs:
-            eqn = eqn.subs(key, value)
-        return eqn
+        # Compile the kinematics into a function
+        self._kinematics = self.kinematics(return_function=True,
+                                           use_external_objects=False)
 
     @property
     def loc(self):
@@ -428,12 +414,12 @@ class Simulator:
         Parameters
         ==========
 
-        T:     The time in seconds to run the simulation for.
-        state: The state object containing the current joint angles and
-               velocities. If no state object is given (i.e., this is set to
-               None), creates a new State object. Note that the State object
-               must not be symbolic.
-        dt:    The maximum timestep used in the evaluation.
+        T:      The time in seconds to run the simulation for.
+        state:  The state object containing the current joint angles and
+                velocities. If no state object is given (i.e., this is set to
+                None), creates a new State object. Note that the State object
+                must not be symbolic.
+        dt:     The maximum timestep used in the evaluation.
         """
         while T > 0:
             cur_dt = min(T, dt)  # Step exactly to T
@@ -441,60 +427,85 @@ class Simulator:
             T -= cur_dt
         return state
 
-    def step(self, state=None, dt=1e-3):
+    def step(self, state=None, dt=1e-2):
         """
-        Advances the simulation by one timestep from the given state. If no
-        state is given, a new State() object corresponding to the initial state
-        is generated.
+        Advances the simulation by one timestep from the given state using a
+        fourth-order Runge-Kutta integrator. If no state is given, a new State()
+        object corresponding to the initial state is generated.
 
         Parameters
+        ==========
+
+        state:  State instance that should be advanced.
+        dt:     Time-step in seconds.
+
+        Return
+        ======
         """
 
         # Fetch the initial state
         if state is None:
             state = self.initial_state()
 
-        # Fetch the number of state variables
-        n = self._n_joints
-
-        # Create the state vector
-        x = state.vec
+        # Fetch the dynamics descriptor and state vector
+        dyns, x = self._dynamics, state.vec
 
         # Perform a single Runge-Kutta 4 (RK4) step
-        k1 = self._solve_dynamics(x)
-        k2 = self._solve_dynamics(x + dt * k1 / 2.0)
-        k3 = self._solve_dynamics(x + dt * k2 / 2.0)
-        k4 = self._solve_dynamics(x + dt * k3)
+        k1 = self.state_differential(dyns, x)
+        k2 = self.state_differential(dyns, x + dt * k1 / 2.0)
+        k3 = self.state_differential(dyns, x + dt * k2 / 2.0)
+        k4 = self.state_differential(dyns, x + dt * k3)
         state.vec = x + dt * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
         state._t += dt
         state._step_count += 1
 
         return state
 
-    def forward_kinematics(self, state=None, use_external_objects=True):
+    def kinematics(self,
+                   state=None,
+                   return_function=False,
+                   use_external_objects=True):
         """
-        Computes the location and orientation of either all point objects or the
-        specified point object. If no state is given, computes the forward
-        kinematics symbolically, i.e., as mathematical equations depending on
-        the joint angles.
+        Computes the location and orientation of either all point objects or
+        the specified point object. If no state (or a symbolic state) is given,
+        computes the forward kinematics symbolically, i.e., as mathematical
+        equations depending on  the joint angles.
 
-        If an object is returned, returns a transformation matrix for each point
-        object in the chain encoding the location and rotation of that point.
+        Setting the "return_function" parameter to True causes "kinematics" to
+        return a function that maps the a static state vector (as stored in
+        State.static_vec) onto an object map such as the one usually returned
+        by this function. The benefit is that the returned function no longer
+        directly makes use of sympy and is thus much faster.
+
 
         Parameters
         ==========
 
-        state: The state object determines the configuration of all joints. If
-               None, computes the forward kinematics symbolically, where the
-               joint angles are called "theta_1" to "theta_n"
-        obj:   The object for which thre transformation should be computed. If
-               "None", the transformation will be computed for all point objects
-               in the chain. TODO
-        use_external_objects: If true, the returned object to transformation
-               map will use the original user-provided object references.
-               Setting this to False will return internal object references.
-               This is mainly meant for internal use.
+        state:  The state used to compute the forward kinematics. This may
+                either by a numerical, or a symbolic state instance (as returned
+                by symbolic_state() or initial_state().
+
+        return_function:
+                If True, returns a function that maps a state vector as returned
+                by "State.static_vec" onto the transformation matrices for all
+                objects. Using this function is much faster than calling
+                "kinematics" with a numerical state instance.
+
+                Note that thestate argument "state" must be set to None if
+                "return_function" is set to True.
+
+        use_external_objects:
+                If True, the returned object-to-transformation-map will use the
+                original user-provided object references (which is what a user
+                of the library most likely wants). Setting this to False will
+                return internal object references, instead, which is what
+                internal users of this function want.
         """
+
+        if (not state is None) and return_function:
+            raise ValueError(
+                "A \"state\" may only be given if \"return_function\" is False"
+            )
 
         if state is None:
             state = self.symbolic_state()
@@ -503,11 +514,10 @@ class Simulator:
         loc, rot = state.loc, state.rot
         trafo = trans(*loc) @ rot_z(rot[2]) @ rot_y(rot[1]) @ rot_x(rot[0])
 
-        # Store the root object in a transformation dictionary
-        T = {self.root: trafo}
-
         # Perform a breadth-first search on the tree to compute all
-        # transformations
+        # transformations. In case we're returning a function, keep track of
+        # the parent node of each object.
+        T = {self.root: (None, trafo) if return_function else trafo}
         queue = deque((self.root, ))
         while len(queue) > 0:
             # Fetch the current node
@@ -517,8 +527,12 @@ class Simulator:
             if not cur in self._tree:
                 continue
 
-            # Fetch the transformation up to the current point
-            trafo = T[cur]
+            # Fetch the transformation up to the current point; if we're
+            # returning a function, only compute the element-wise transformation
+            if return_function:
+                trafo = np.eye(4)
+            else:
+                trafo = T[cur]
 
             # If the current source object is a joint, account for the joint
             # transformation
@@ -529,25 +543,77 @@ class Simulator:
             # Iterate over all link targets
             for link in self._tree[cur]:
                 assert (cur is link.src)
-                T[link.tar] = trafo @ link.trafo()
+                ltrafo = trafo @ link.trafo()
+                T[link.tar] = (cur, ltrafo) if return_function else ltrafo
                 queue.append(link.tar)
 
-        # If a sympy expression is purely numerical, convert it to a numpy array
-        for key, value in T.items():
-            value = value.evalf()
-            if all(map(lambda x: isinstance(x, sp.core.numbers.Number),
-                       value)):
-                value = np.array(value, dtype=np.float64)
-            T[key] = value
-
-        # Translate the internal clone object references to external references
+        # Translate the object references
+        omap = self.object_map
         if use_external_objects:
             res = {}
-            for key, value in T.items():
-                res[self.object_map[key].original] = value
+            if return_function:
+                for key, (parent, value) in T.items():
+                    res[omap[key].original] = (omap[parent].original, value)
+            else:
+                for key, value in T.items():
+                    res[omap[key].original] = value
             return res
-        else:
+
+        # We're done here if we were to solve this symbolically
+        if not return_function:
             return T
+
+        # Otherwise convert each individual transformation into a function;
+        # also, produce a set of leaf nodes, i.e., objects that are never
+        # referenced as a parent
+        S = self.symbols  # Alias
+        args = S.var_origin + S.var_theta  # Arguments passed to the functions
+        if use_external_objects:
+            leafs = set(map(lambda x: omap.original, self.point_objects))
+        else:
+            leafs = set(self.point_objects)
+        for key, (parent, value) in T.items():
+            # The parent cannot be a leaf
+            if parent in leafs:
+                leafs.remove(parent)
+
+            # Substitute the functions over time with variables and simplify
+            # the resulting expression
+            expr = sp.simplify(S.subs(value))
+
+            # Convert the expression into a lambda and append it
+            T[key] = (parent, sp.lambdify(args, expr, modules=["numpy"]))
+
+        # Define the actual function we're returning here
+        def evaluate_kinematics(*args):
+
+            # Recursion base case -- map "None" onto the identity transformation
+            res = {}
+
+            # Recursive evaluation of the object location
+            def eval(node):
+                # Fetch the parent of the given leaf, as well as the
+                # transformation function
+                parent, f_trafo = T[node]
+
+                # Abort if this is the root node
+                if parent is None:
+                    res[node] = f_trafo(*args)
+                    return
+
+                # Recurse upwards
+                if not parent in res:
+                    eval(parent)
+
+                # Store the transformation of the specific child in the result
+                res[node] = res[parent] @ f_trafo(*args)
+
+            for leaf in leafs:
+                eval(leaf)
+
+            return res
+
+        return evaluate_kinematics
 
     def lagrangian(self, g=None):
         """
@@ -557,8 +623,8 @@ class Simulator:
         Parameters
         ==========
 
-        g: Gravity vector for which the Lagrangian should be computed. If set to
-           None, uses the symbolic vector [g_x, g_y, g_z].
+        g:      Gravity vector for which the Lagrangian should be computed. If
+                set to None, uses the symbolic vector [g_x, g_y, g_z].
         """
 
         # Use the symbolic gravity vector if None is given
@@ -566,7 +632,7 @@ class Simulator:
             g = self.symbols.g
 
         # Symbolically compute the forward kinematics
-        trafos = self.forward_kinematics(use_external_objects=False)
+        trafos = self.kinematics(use_external_objects=False)
 
         # Fetch the symbol representing time
         t = self.symbols.t
@@ -595,11 +661,11 @@ class Simulator:
         """
 
         # Symbolically compute the forward kinematics
-        trafos = self.forward_kinematics(use_external_objects=False)
+        trafos = self.kinematics(use_external_objects=False)
 
         # Compute the forward kinematics for the initial state
-        trafos_init = self.forward_kinematics(state=self.initial_state(),
-                                              use_external_objects=False)
+        trafos_init = self.kinematics(state=self.initial_state(),
+                                      use_external_objects=False)
 
         # For each fixture, add a set of constraints regarding its location
         Cs = []
@@ -613,20 +679,22 @@ class Simulator:
 
         return Cs
 
-    def dynamics(self, g=None, symbolic=False):
+    def dynamics(self, g=None, return_function=False):
         """
-        Returns a list of equations describing the dynamics of the system.
+        Returns a map of equations describing the dynamics of the system.
 
         Parameters
         ==========
 
         g:        The gravity vector. If None is given, uses the value for "g"
                   passed to the constructor of the simulator object.
-        symbolic: If True, returns the symbolic equations describing the
-                  dynamics of each state variable.
+        return_function:
+                  If True, returns the symbolic equations describing the
+                  dynamics of each state variable. Otherwise returns a tuple of
+                  functions that can be used to build a linear system of
+                  equations implicitly describing the dynamics. These functions
+                  can be passed to the "Simulator.state_differential" function.
         """
-
-        from sympy.utilities.lambdify import lambdify
 
         # Load the default values for some values
         if g is None:
@@ -759,11 +827,13 @@ class Simulator:
 
         # If the user did not want the symbolic solution, just turn the matrices
         # into callable functions
-        if symbolic is False:
+        if return_function:
             args = S.var_origin + S.var_theta + S.var_dorigin + S.var_dtheta
             f_A = sp.lambdify(args, A, modules=["numpy"])
             f_b = sp.lambdify(args, b, modules=["numpy"])
-            f_subs = sp.lambdify(args, [0.0 if (x is None) else x for x in subs], modules=["numpy"])
+            f_subs = sp.lambdify(args,
+                                 [0.0 if (x is None) else x for x in subs],
+                                 modules=["numpy"])
             return f_A, f_b, f_subs, T
 
         # Solve the linear system symbolically
@@ -785,13 +855,67 @@ class Simulator:
                 res[tars[i]] = x
         return res
 
+    @staticmethod
+    def state_differential(dyns, x):
+        """
+        This function maps a state vector "x" onto a state differential given
+        a dynamics descriptor as returned by the "dynamics" function for
+        "return_function = True".
+
+        Parameters
+        ==========
+
+        x:      State vector as stored in the "State.vec" property.
+        dyns:   Dynamics descriptor as returned by calling Simulator.dynamics()
+                with return_function=True.
+
+        Return Value
+        ============
+
+        Returns the time-differential of x.
+        """
+
+        # Unpack the dynamics descriptor
+        f_A, f_b, f_subs, T = dyns
+
+        # Compute some handy indices used below
+        n = len(x) // 2 - 3
+        i0, i1, i2 = 0, 3 + n, 6 + 2 * n  # i1:i2 --> velocities in x
+        j0, j1 = 0, 3 + n  # j0:j1 --> accls. in the lin. sys.
+
+        # Compute the linear system for the given state
+        A = f_A(*x)
+        b = f_b(*x)
+
+        # Compute the variable subtitutions. These are Lagrange multipliers or
+        # accelerations that were determined to have a fixed value
+        subs = f_subs(*x)
+
+        # Solve for the accelerations and Lagrange multipliers
+        soln = np.linalg.lstsq(A, b, rcond=1e-6)[0]
+
+        # The resulting accelerations are the sum of the substitutions and the
+        # the solution to the linear system computed above.
+        ddx = (T @ soln + subs)[:, 0]
+
+        # Return the state update vector
+        return np.concatenate((x[i1:i2], ddx[j0:j1]))
+
+    ###########################################################################
+    # Visualization                                                           #
+    ###########################################################################
 
     def _visualize_raw(self, state=None):
+        """
+        Uses internally to create the raw drawing commands.
+        """
+
         # Compute the forward kinematics for the given state. Pass the
         # non-symbolic "initial_state" instance.
         if state is None:
             state = self.initial_state()
-        T = self.forward_kinematics(state, use_external_objects=False)
+
+        T = self._kinematics(*state.static_vec)
 
         raw = []
 
@@ -807,7 +931,7 @@ class Simulator:
 
         # Draw the point object locations
         for pobj, trafo in T.items():
-            loc = trafo[:3, 3]
+            loc = np.array(trafo[:3, 3]).reshape(-1)
             raw.append({
                 "type": "object",
                 "class": pobj.__class__.__name__.lower(),
@@ -820,7 +944,9 @@ class Simulator:
             for i, ax in enumerate(np.eye(3, 3)):
                 l = 0.1
                 src = trafo[:3, 3]
-                tar = np.array((trafo @ trans(*ax)), dtype=np.float64)[:3, 3]
+                trans = res = np.eye(4)
+                trans[:3, 3] = ax
+                tar = (trafo @ trans)[:3, 3]
                 raw.append({
                     "type": "axis",
                     "class": "xyz"[i],

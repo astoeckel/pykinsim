@@ -121,11 +121,11 @@ def test_simulator_forward_kinematics_1():
         m1 = pks.Mass()
 
     with pks.Simulator(chain, m1) as sim:
-        trafos = sim.forward_kinematics(sim.initial_state())
+        trafos = sim.kinematics(sim.initial_state())
 
     assert len(trafos) == 1
     assert m1 in trafos
-    assert np.all(trafos[m1] == np.eye(4))
+    assert np.all(np.array(trafos[m1]) == np.eye(4))
 
 
 def test_simulator_forward_kinematics_2():
@@ -135,15 +135,15 @@ def test_simulator_forward_kinematics_2():
         pks.Link(m1, m2)
 
     with pks.Simulator(chain, m1) as sim:
-        trafos = sim.forward_kinematics(sim.initial_state())
+        trafos = sim.kinematics(sim.initial_state())
 
     assert len(trafos) == 2
 
     assert m1 in trafos
-    assert np.all(trafos[m1] == np.eye(4))
+    assert np.all(np.array(trafos[m1]) == np.eye(4))
 
     assert m2 in trafos
-    assert np.all(trafos[m2] == (np.eye(4) + np.eye(4, 4, 3)))
+    assert np.all(np.array(trafos[m2]) == (np.eye(4) + np.eye(4, 4, 3)))
 
 
 def test_simulator_forward_kinematics_symbolic():
@@ -160,7 +160,7 @@ def test_simulator_forward_kinematics_symbolic():
         pks.Link(m1, m2, l=l2)
 
     with pks.Simulator(chain, f1) as sim:
-        trafos = sim.forward_kinematics()
+        trafos = sim.kinematics()
 
     theta = sim.symbols.theta[0]
     x, z = sim.symbols.x, sim.symbols.z
@@ -181,7 +181,7 @@ def test_simulator_dynamics_symbolic():
         pks.Link(j1, m1, l=1.0)
 
     with pks.Simulator(chain, f1) as sim:
-        dynamics = sim.dynamics(g=(0.0, 0.0, 9.81), symbolic=True)
+        dynamics = sim.dynamics(g=(0.0, 0.0, 9.81))
         print(dynamics)
 
     theta = sim.symbols.var_theta[0]
