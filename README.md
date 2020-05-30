@@ -55,7 +55,7 @@ The code snippet above should be enough to get you started. See the `examples` f
 
 ## Installation and Dependencies
 
-*PyKinSim* depends on a recent version of `numpy` and `sympy`. To install, just run the following command in the root directory of the repository.
+*PyKinSim* depends on a recent version of `numpy` and `sympy`. To make use of the `matplotlib` visualization type, you need to install `matplotlib`. To install `pykinsim`, just run the following command in the root directory of the repository.
 ```sh
 pip3 install -e .
 ```
