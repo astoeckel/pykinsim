@@ -40,57 +40,9 @@ def test_tree_forward():
         l1 = pks.Link(m1, j)
         l2 = pks.Link(j, m2)
 
-    tree = chain.tree(m1)
+    tree, root = chain.tree()
+    assert root is m1
     assert len(tree) == 2
     assert m1 in tree
     assert len(tree[m1]) == 1
     assert tree[m1][0] is l1
-
-    assert j in tree
-    assert len(tree[j]) == 1
-    assert tree[j][0] is l2
-
-    tree = chain.tree(m2)
-    assert len(tree) == 2
-    assert m2 in tree
-    assert len(tree[m2]) == 1
-    assert tree[m2][0].direction == pks.Backward
-    assert tree[m2][0].src is m2
-    assert tree[m2][0].tar is j
-
-    assert j in tree
-    assert len(tree[j]) == 1
-    assert tree[j][0].direction == pks.Backward
-    assert tree[j][0].src is j
-    assert tree[j][0].tar is m1
-
-def test_tree_backward():
-    with pks.Chain() as chain:
-        m1 = pks.Mass()
-        m2 = pks.Mass()
-        j = pks.Joint("y")
-        l1 = pks.Link(m1, j)
-        l2 = pks.Link(j, m2)
-
-    tree = chain.tree(m1, direction=pks.Backward)
-    assert m2 in tree
-    assert len(tree[m2]) == 1
-    assert tree[m2][0].direction == pks.Backward
-    assert tree[m2][0].src is m2
-    assert tree[m2][0].tar is j
-
-    assert j in tree
-    assert len(tree[j]) == 1
-    assert tree[j][0].direction == pks.Backward
-    assert tree[j][0].src is j
-    assert tree[j][0].tar is m1
-
-    tree = chain.tree(m2, direction=pks.Backward)
-    assert len(tree) == 2
-    assert m1 in tree
-    assert len(tree[m1]) == 1
-    assert tree[m1][0] is l1
-
-    assert j in tree
-    assert len(tree[j]) == 1
-    assert tree[j][0] is l2

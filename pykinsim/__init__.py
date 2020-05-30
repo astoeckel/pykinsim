@@ -18,9 +18,6 @@ from .errors import (ValidationError, CyclicChainError, DisconnectedChainError,
                      MultipleSourcesError)
 
 from .model import (
-    LinkDirection,
-    Forward,
-    Backward,
     Chain,
     Link,
     PointObject,

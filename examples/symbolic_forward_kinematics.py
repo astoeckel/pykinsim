@@ -3,7 +3,7 @@
 import sympy as sp
 import pykinsim as pks
 
-theta, l1, l2 = sp.symbols("\\theta \\ell_1 \\ell_2")
+theta, l1, l2 = sp.symbols("theta l1 l2")
 
 with pks.Chain() as chain:
     f1 = pks.Fixture()
@@ -16,7 +16,8 @@ with pks.Chain() as chain:
     pks.Link(m1, m2, l=l2)
 
 with pks.Simulator(chain, f1) as sim:
-    trafos = sim.forward_kinematics()
+    state = sim.symbolic_state()
+    trafos = sim.kinematics(state)
 
 print("m1.x(t) =", trafos[m1][0, 3])
 print("m1.z(t) =", trafos[m1][2, 3])

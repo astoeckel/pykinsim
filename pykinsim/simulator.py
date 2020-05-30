@@ -14,16 +14,16 @@
 #   You should have received a copy of the GNU Affero General Public License
 #   along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+from .errors import *
+from .model import *
+from .utils import *
+from .geometry import *
+
 import numpy as np
 import sympy as sp
 
 import logging
 logger = logging.getLogger(__name__)
-
-from .errors import *
-from .model import *
-from .utils import *
-from .algebra import *
 
 # Default gravity vector
 DEFAULT_GRAVITY = (0.0, 0.0, 9.81)
@@ -233,7 +233,12 @@ class Simulator:
     provides functions that facilitate the physical simulation of the
     kinematics chain.
     """
-    def __init__(self, chain, root, loc=None, rot=None, g=(0.0, 0.0, 9.81)):
+    def __init__(self,
+                 chain,
+                 root=None,
+                 loc=None,
+                 rot=None,
+                 g=(0.0, 0.0, 9.81)):
         """
         Creates a new Simulator object for the given chain. The "root" object
         is the object relative to which the location of all other objects is
@@ -255,7 +260,8 @@ class Simulator:
 
         chain: The Chain instance for which the simulator should be created.
         root:  The Mass or Joint object relative to which the location of all
-               other objects is reported.
+               other objects is reported. If None, automatically determines the
+               root object by chosing the root node of the kinematics tree.
         loc:   An optional three-tuple describing the location of the root
                object within the world coordinate space. If not specified, the
                root object is located at (0, 0, 0).
@@ -266,18 +272,22 @@ class Simulator:
                Per default, the gravity vector is aligned with the z-axis.
         """
 
-        # Make sure that "chain" and "root" have the right type
+        # Make sure that "chain" has the right type
         if not isinstance(chain, Chain):
             raise ValidationError("\"chain\" must be an instance of \"Chain\"",
                                   self)
-        if not isinstance(root, PointObject):
-            raise ValidationError(
-                "\"root\" must be a \"PointObject\" instance", self)
 
-        # Make sure the "root" object is actually part of the Chain instance
-        if not root in chain:
-            raise ValidationError(
-                "The given \"root\" object must be part of the chain", self)
+        # Make sure "root" is either None or has the right type
+        if not root is None:
+            if not isinstance(root, PointObject):
+                raise ValidationError(
+                    "\"root\" must be a \"PointObject\" instance", self)
+
+            # Make sure the "root" object is actually part of the Chain instance
+            if not root in chain:
+                raise ValidationError(
+                    "The given \"root\" object must be part of the chain",
+                    self)
 
         # Make sure loc and rot are correct
         if loc is None:
@@ -286,22 +296,14 @@ class Simulator:
             rot = np.zeros(3)
         assert len(loc) == 3
         assert len(rot) == 3
+        assert len(g) == 3
 
-        # Copy the locations/vectors
-        self._loc = loc
-        self._rot = rot
+        # Copy the gravity vector
         self._g = g
 
         # Copy and validate the "chain" object
         self.object_map = {}  # External to internal object map
         self.chain = chain.copy(self.object_map).coerce()
-
-        # Translate the given root object into the corresponding root object in
-        # the copy
-        self.root = self.object_map[root].clone
-
-        # Build the spanning tree
-        self._tree = self.chain.tree(self.root)
 
         # Count the number of joints and constraints
         self._n_joints = sum(1 for _ in self.joints)
@@ -317,12 +319,49 @@ class Simulator:
         # symbolically
         self._symbols = Symbols(self._n_joints, self._n_cstrs)
 
-        # Compile the dynamics into a function (aka the dynamics descriptor)
-        self._dynamics = self.dynamics(return_function=True)
+        # Build the spanning tree
+        self._tree, self._tree_root = self.chain.tree()
 
-        # Compile the kinematics into a function
-        self._kinematics = self.kinematics(return_function=True,
-                                           use_external_objects=False)
+        # If a root element has been specified, setup the rotation and offset
+        # in such a way that the local coordinate system of the root element
+        # is aligned with the global coordinate stytem
+        self._loc = np.zeros(3)
+        self._rot = np.zeros(3)
+        if not root is None:
+            # Translate the user-provided root reference to a local object
+            self._root = self.object_map[root].clone
+
+            # Compute the forward kinematics for that root element
+            T = self.kinematics(state=self.initial_state(),
+                                use_external_objects=False)[self._root]
+
+            # Translate the coordinate system such that the root element is
+            # in the center
+            self._loc = np.array(-T[:3, 3]).flatten()
+
+            # Rotate the coordinate system such that the local coordinate system
+            # if the root element is aligned with the coordinate system of the
+            # global coordinate frame.
+            psi, theta, phi = rot_to_euler(T[:3, :3])
+            self._rot = (-psi, -theta, -phi)
+        else:
+            self._root = self._tree_root
+
+        # Apply the user-specified transformation
+        self._loc += loc
+        self._rot += rot
+
+        try:
+            # Compile the kinematics into a function
+            self._kinematics = self.kinematics(return_function=True,
+                                            use_external_objects=False)
+
+            # Compile the dynamics into a function (aka the dynamics descriptor)
+            self._dynamics = self.dynamics(return_function=True)
+        except TypeError:
+            self._kinematics = None
+            self._dynamics = None
+            logger.warn("Could not compile system for numerical simulation")
 
     @property
     def loc(self):
@@ -400,10 +439,13 @@ class Simulator:
             state.states[i] = self.symbols.theta[i]
             state.velocities[i] = self.symbols.dtheta[i]
 
-        # Use the symbolic x, y, z, rx, ry, rz variables
+        # Use the symbolic x, y, z variables
         for i in range(3):
             state.loc[i] = self.symbols.origin[i]
-            #state.rot[i] = self.symbols.rot[i] # TODO
+
+        # Use the non-symbolic rotation
+        for i in range(3):
+            state.rot[i] = float_to_pi(self._rot[i])
 
         return state
 
@@ -512,13 +554,13 @@ class Simulator:
 
         # Compute the root object transformation
         loc, rot = state.loc, state.rot
-        trafo = trans(*loc) @ rot_z(rot[2]) @ rot_y(rot[1]) @ rot_x(rot[0])
+        trafo = euler_to_rot(*rot) @ trans(*loc)
 
         # Perform a breadth-first search on the tree to compute all
         # transformations. In case we're returning a function, keep track of
         # the parent node of each object.
-        T = {self.root: (None, trafo) if return_function else trafo}
-        queue = deque((self.root, ))
+        T = {self._tree_root: (None, trafo) if return_function else trafo}
+        queue = deque((self._tree_root, ))
         while len(queue) > 0:
             # Fetch the current node
             cur = queue.popleft()
@@ -569,7 +611,7 @@ class Simulator:
         S = self.symbols  # Alias
         args = S.var_origin + S.var_theta  # Arguments passed to the functions
         if use_external_objects:
-            leafs = set(map(lambda x: omap.original, self.point_objects))
+            leafs = set(map(lambda x: omap[x].original, self.point_objects))
         else:
             leafs = set(self.point_objects)
         for key, (parent, value) in T.items():
@@ -913,10 +955,8 @@ class Simulator:
         """
 
         # Randomly generate states and compute the axis-aligned bounding-box
-        aabb = np.array((
-            (np.inf, -np.inf),
-            (np.inf, -np.inf),
-            (np.inf, -np.inf)))
+        aabb = np.array(
+            ((np.inf, -np.inf), (np.inf, -np.inf), (np.inf, -np.inf)))
 
         state = self.initial_state()
         rng = np.random.RandomState(seed)
@@ -925,8 +965,8 @@ class Simulator:
                 state[i] = rng.uniform(-np.pi, np.pi)
             trafos = self._kinematics(*state.static_vec)
             for T in trafos.values():
-                aabb[:, 0] = np.minimum(T[i, 3], aabb[:, 0])
-                aabb[:, 1] = np.maximum(T[i, 3], aabb[:, 0])
+                aabb[:, 0] = np.minimum(T[:3, 3], aabb[:, 0])
+                aabb[:, 1] = np.maximum(T[:3, 3], aabb[:, 1])
 
         # Round the result for more stability
         ext = np.maximum(1.0, aabb[:, 1] - aabb[:, 0])
@@ -936,8 +976,7 @@ class Simulator:
         # If "radius" is True, use the maximum extent in one dimension to
         # set the extent of the others.
         if radius:
-            center = 0.5 * (aabb[:, 0] + aabb[:, 1])
-            max_ext = np.max(ext)
+            max_ext, center = np.max(ext), 0.5 * (aabb[:, 0] + aabb[:, 1])
             aabb[:, 0] = center - 0.5 * max_ext
             aabb[:, 1] = center + 0.5 * max_ext
 
@@ -994,7 +1033,12 @@ class Simulator:
 
         return raw
 
-    def visualize(self, state=None, kind="matplotlib", handle=None, ax=None, aabb=None):
+    def visualize(self,
+                  state=None,
+                  kind="matplotlib",
+                  handle=None,
+                  ax=None,
+                  aabb=None):
         """
         Creates a visualisation of the kinematic chain in the given state.
 
@@ -1030,4 +1074,3 @@ class Simulator:
         if kind == "matplotlib":
             from .visualization import _visualize_matplotlib
             return _visualize_matplotlib(raw, handle, ax, aabb)
-

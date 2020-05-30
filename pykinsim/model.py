@@ -13,13 +13,17 @@
 #
 #   You should have received a copy of the GNU Affero General Public License
 #   along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 """
 This file contains all the data objects holding information about the model
 built by the user. These objects are merely data containers and do not contain
 any simulation logic. The "Simulator" class must be used to compile a model
 into an actual simulation.
 """
+
+from .errors import (ValidationError, CyclicChainError, DisconnectedChainError,
+                     MultipleSourcesError)
+from .utils import variables
+from .geometry import scalar, trans, rot_x, rot_y, rot_z
 
 import sympy as sp
 import re
@@ -30,15 +34,11 @@ from collections import deque
 import threading
 _thread_local = threading.local()
 
-from .errors import *
-from .utils import *
-from .algebra import *
-
 
 class Labeled:
     """
     A "Labeled" object is simply an object with a "label" property. This label
-    will be printed as the representation of the object. PyKinSim automagically
+    will be printed as the representation of the object. PyKinSim automagically™
     deduces object labels from variable names whenever the scope of a
     "with Chain..." statement is left.
     """
@@ -55,29 +55,6 @@ class Labeled:
             return "<{class} @ 0x{addr:02x}>".format(**fmt)
         else:
             return "<{label} ({class} @ 0x{addr:02x})>".format(**fmt)
-
-
-class LinkDirection(Labeled):
-    """
-    The LinkDirection class is mostly used internally to define the direction
-    in which a Link transformation is applied. Instead of instantiating a new
-    instance of this class, use the "Forward" or "Backward" instances instead.
-    """
-    pass
-
-
-Forward = LinkDirection("forward")
-
-Backward = LinkDirection("backward")
-
-
-def invert_direction(direction):
-    if direction is Forward:
-        return Backward
-    elif direction is Backward:
-        return Forward
-    else:
-        raise ValueError("Invalid LinkDirection, must be Forward or Backward")
 
 
 class ObjectMapEntry:
@@ -106,7 +83,7 @@ class Chain(Labeled):
     body dynamics of the Chain, and to compute forward-kinematics.
 
     The Chain object is intended to be used in conjunction with a "with"
-    statement. Object instances created inside  this block will automatically be
+    statement. Object instances created inside this block will automatically be
     added to the Chain (see the example below).
 
     Example
@@ -202,7 +179,7 @@ class Chain(Labeled):
         new and old objects in the object_map dictionary
         """
         def deepcopy(obj, object_map):
-            if isinstance(obj, (LinkDirection, sp.Symbol, sp.MatrixSymbol, sp.Function)):
+            if isinstance(obj, (sp.Symbol, sp.MatrixSymbol, sp.Function)):
                 return obj
             elif isinstance(obj, list):
                 return [deepcopy(value, object_map) for value in obj]
@@ -226,50 +203,57 @@ class Chain(Labeled):
                 # Copy all attributes stored in the object
                 for key, value in obj.__dict__.items():
                     setattr(clone, key, deepcopy(value, object_map))
+                return clone
             elif hasattr(obj, "copy") and callable(obj.copy):
                 return obj.copy()
             else:
                 return obj
 
-            return clone
-
         return deepcopy(self, object_map)
 
-    def tree(self, root, direction=Forward):
+    def tree(self):
         """
-        Builds a spanning tree with the given root object as the root of the
-        tree. This function may raise various ValidationError types if the chain
-        cannot be converted into a tree (i.e., because there are cycles in the
-        chain, multiple source joints for a link or multiple disconnected
-        components in the graph).
-
-        The result of this operation is a dictionary of point objects with a
-        list of incoming/outgoing links (this depends on the specified
-        direction).
+        Builds a spanning tree. Automatically choses a suitable root node from
+        which all other nodes can be reached. This function may raise various
+        ValidationError types if the chain cannot be converted into a tree
+        (i.e., because there are cycles in the chain, multiple source joints
+        for a link or multiple disconnected components in the graph).
         """
 
-        # Make sure the "direction" flag is correct
-        assert (direction is Forward) or (direction is Backward)
-        fwd = direction is Forward
+        # Make sure the chain is not empty
+        pobjs = set(filter(lambda x: isinstance(x, PointObject), self._objs))
+        if len(pobjs) == 0:
+            raise ValidationError(
+                "Kinematic chain must contain at least one point object", self)
 
-        # Collect all possible links, both in forward and backward direction
-        links = {
-        }  # Dictionary mapping from point objects onto a list of links
-        # connecting each node to another object
+        # Collect all possible links as a map of source objects onto links
+        links = {}
+        roots = set(pobjs)
         for link in filter(lambda x: isinstance(x, Link), self._objs):
+            # Remove the target node from the set of potential roots
+            if link.tar in roots:
+                roots.remove(link.tar)
+            else:
+                raise MultipleSourcesError(
+                    "Node {} already targeted by another link".format(
+                        link.tar), link)
+
             # Store forward and backward links as tuples
             if not link.src in links:
                 links[link.src] = []
             if not link.tar in links:
                 links[link.tar] = []
-            links[link.src].append((link, False))  # Non-inverted link
-            links[link.tar].append((link, True))  # Inverted link
+            links[link.src].append(link)
 
-            # Make sure that each node is targeted by at most one forward link
-            if sum(map(lambda x: int(x[1]), links[link.tar])) > 1:
-                raise MultipleSourcesError(
-                    "Node {} already targeted by another link".format(
-                        link.tar), link)
+        # There must be exactly one root node; still to give a better error
+        # message below, just use either the first point object or the first
+        # possible root.
+        if len(roots) == 0:
+            raise CyclicChainError(
+                "No possible root node found; kinematic chain is cyclic")
+
+        # Fetch the first possible node as a root node
+        root = next(iter(roots))
 
         # Perform a breadth-first search on the graph
         tree = {}
@@ -283,28 +267,28 @@ class Chain(Labeled):
                 continue
 
             # Iterate over all links originating from this node
-            for link, inv in links[cur]:
-                # If this link has already been used (in either direction),
-                # continue
+            for link in links[cur]:
+                # Continue if this link has already been used
                 if link in links_visited:
                     continue
                 links_visited.add(link)  # Remember that we've used this link
 
                 # Fetch the target object of this link
-                tar = link.tar if not inv else link.src
+                tar = link.tar
 
                 # Make sure the target object has not already been visited
                 if tar in visited:
                     raise CyclicChainError(
-                        "Kinematic chain is cyclic; {} can be reached through multiple paths from root {} through this link {}"
-                        .format(tar, root, link), link)
+                        "Kinematic chain is cyclic; {} can be reached through "
+                        "multiple paths from root {} through this link {}".
+                        format(tar, root, link), link)
                 visited.add(tar)  # Remember that we've visited this node
 
                 # Add the node to the queue
                 queue.append(tar)
 
                 # Add this link to the tree
-                k, v = (cur, (link, inv)) if fwd else (tar, (link, not inv))
+                k, v = cur, link
                 if not k in tree:
                     tree[k] = []
                 tree[k].append(v)
@@ -313,15 +297,15 @@ class Chain(Labeled):
         for pobj in filter(lambda x: isinstance(x, PointObject), self._objs):
             if not pobj in visited:
                 raise DisconnectedChainError(
-                    "The point object {} is not connected to the root node {}"
-                    .format(pobj, root), pobj)
+                    "The point object {} is not connected to the root node {}".
+                    format(pobj, root), pobj)
 
-        # Replace the (link, inv) tuples in the tree with Link instances
-        for _, links in tree.items():
-            for i, (link, inv) in enumerate(links):
-                links[i] = link if not inv else link.invert()
+        # If there were multiple possible roots, one of the exceptions above
+        # should have triggered. Still, assert this, just to be on the safe
+        # side.
+        assert len(roots) == 1, "Multiple roots. This should not happen."
 
-        return tree
+        return tree, root
 
 
 class Object(Labeled):
@@ -383,7 +367,6 @@ class Link(Object):
                  l=1.0,
                  ry=0.0,
                  rz=0.0,
-                 direction=Forward,
                  label=None,
                  parent=None):
         """
@@ -422,29 +405,9 @@ class Link(Object):
         self.l = l
         self.ry = ry
         self.rz = rz
-        self.direction = direction
-
-    def invert(self):
-        """
-        Returns a copy of this link object with src and tar swapped and the
-        direction inverted.
-        """
-        # Create the inverted link object
-        res = Link(self.tar, self.src, self.l, self.ry, self.rz,
-                   invert_direction(self.direction), self.label, self.parent)
-
-        # Remove the link object from the chain
-        self.parent._objs.remove(res)
-
-        return res
-
 
     def trafo(self):
-        if self.direction is Forward:
-            return rot_y(self.ry) @ rot_z(self.rz) @ trans(x=self.l)
-        elif self.direction is Backward:
-            return trans(x=-self.l) @ rot_z(-self.rz) @ rot_y(-self.ry)
-
+        return rot_y(self.ry) @ rot_z(self.rz) @ trans(x=self.l)
 
     def coerce(self):
         # Call the inherited implementation of "coerce"
@@ -462,10 +425,6 @@ class Link(Object):
         self.l = scalar(self.l)
         self.ry = scalar(self.ry)
         self.rz = scalar(self.rz)
-
-        # Make sure the direction is either Forward or Backward
-        if not ((self.direction is Forward) or (self.direction is Backward)):
-            raise ValidationError("Invalid link direction", self)
 
 
 class PointObject(Object):
@@ -494,7 +453,7 @@ class Joint(PointObject):
                 originating from this joint will be continued relative to the
                 local coordinate system of the joint without any change.
         label:  The label assigned to the joint object. If None, pykinsim tries
-                to automagically deduce a label from the variable names used in
+                to automagically™ deduce a label from the variable names used in
                 the code.
         parent: The parent Chain object this object belongs to. Usually you
                 should not set this parameter and instead 
@@ -525,8 +484,8 @@ class Joint(PointObject):
         # Make sure the axis specifier is valid
         if not self.axis in ["x", "y", "z"]:
             raise ValidationError(
-                "Invalid axis specifier \"{}\"; must be one of {{\"x\", \"y\", \"z\"}}"
-                .format(self.axis, self))
+                "Invalid axis specifier \"{}\"; must be one of "
+                "{{\"x\", \"y\", \"z\"}}".format(self.axis, self))
 
         # Make sure theta is valid
         self.theta = scalar(self.theta)
@@ -591,4 +550,3 @@ class Fixture(PointObject):
                 raise ValidationError(
                     "Invalid axis specifier \"{}\"; must be one of {{\"x\", \"y\", \"z\"}}"
                     .format(a), self)
-
