@@ -55,8 +55,8 @@ The code snippet above should be enough to get you started. See the `examples` f
 
 ## Installation and Dependencies
 
-*PyKinSim* depends on a recent version of `numpy` and `sympy`. To make use of the `matplotlib` visualization type, you need to install `matplotlib`. To install `pykinsim`, just run the following command in the root directory of the repository.
-```sh
+*PyKinSim* requires at least Python 3.8 and depends on a recent version of `numpy` and `sympy`. To make use of the `matplotlib` visualization type, you need to install `matplotlib`. To install `pykinsim`, just run the following command in the root directory of the repository (note that, depending on your installation, `pip3` might be called `pip` instead).
+```
 pip3 install -e .
 ```
 
@@ -65,6 +65,8 @@ Alternatively, you can use `pipenv` to run setup a virtual environment for this 
 pipenv install
 ```
 See the `pipenv` documentation for more information.
+
+Pull requests for improving the compatibility of `pykinsim` with older versions of Python 3 or numpy and sympy are welcome!
 
 ## License
 
