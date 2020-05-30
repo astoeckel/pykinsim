@@ -1,6 +1,8 @@
 PyKinSim ‒ Python Kinematic Chain Simulator
 ============================================
 
+![Python application](https://github.com/astoeckel/pykinsim/workflows/Python%20application/badge.svg)
+
 ![Visualization of the Pendulum example above](doc/pendulum_example.svg)
 
 ***PyKinSim* is a Python library simulating rigid kinematic chains,
