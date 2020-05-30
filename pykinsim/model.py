@@ -513,7 +513,7 @@ class Mass(PointObject):
         # Make sure masses are not negative. Physics gets all weird with negative
         # masses.
         if self.m < 0.0:
-            raise ValidationError("Masses must not be negative", obj)
+            raise ValidationError("Masses must not be negative", self)
 
 
 class Fixture(PointObject):
