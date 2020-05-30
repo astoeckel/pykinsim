@@ -26,7 +26,7 @@ setup(
     version='0.1.0',
     author='Andreas Stöckel',
     author_email='astoecke@uwaterloo.ca',
-    description='Python Kinematics Chain Simulator',
+    description='Python Kinematic Chain Simulator',
     long_description=long_description,
     long_description_content_type="text/markdown",
     url='https://github.com/astoeckel/pykinsim',
@@ -40,6 +40,7 @@ setup(
     ],
     install_requires=[
         "numpy>=1.16.3",
+	"sympy>=1.6",
     ],
 )
 
