@@ -1,7 +1,7 @@
 PyKinSim ‒ Python Kinematic Chain Simulator
 ============================================
 
-![Python application](https://github.com/astoeckel/pykinsim/workflows/Python%20application/badge.svg)
+![pytest](https://github.com/astoeckel/pykinsim/workflows/pytest/badge.svg)
 
 ![Visualization of the Pendulum example above](doc/pendulum_example.svg)
 
