@@ -447,7 +447,7 @@ class Simulator:
 
         return state
 
-    def run(self, T, state=None, dt=1e-3):
+    def run(self, T, state=None, dt=1e-2, callback=None, callback_interval=None):
         """
         Advances the simulation up to T in timesteps smaller or equal to dt.
 
@@ -459,12 +459,61 @@ class Simulator:
                 velocities. If no state object is given (i.e., this is set to
                 None), creates a new State object. Note that the State object
                 must not be symbolic.
-        dt:     The maximum timestep used in the evaluation.
+        dt:     The maximum timestep used in the evaluation. This value must be
+                strictly positive.
+        callback: If given, is called every "callback_interval" seconds of
+                simulation time. The function receives two parameters: the
+                current time "t", as well as the current state. The function may
+                return the boolean False to abort the simulation early.
+        callback_interval: The interval in seconds within which the callback
+                function is called. If "None", this is set to dt, i.e., the
+                callback is called every timestep. Note that the times at which
+                the callback is called are aligned with the global simulation
+                time (i.e., if callback_interval is 1s, the callback will be
+                called at state.t = 0.0, state.t = 1.0, state.t = 2.0, etc.).
+                This value must be greater than or equal to dt.
         """
+        # Use the initial state if no state is given
+        if state is None:
+            state = self.initial_state()
+
+        # Make sure "dt" has a sane value to prevent infinite loops.
+        if dt <= 0.0:
+            raise ValueError("dt must be strictly positive.")
+
+        # Make sure "callback_interval" has a sane value. Set to infinity if
+        # there is no callback.
+        if callback_interval is None:
+            callback_interval = dt if callback else np.inf
+        if callback_interval < dt:
+            raise ValueError("callback_interval must be greater than or equal to the timestep dt.")
+
+        # Compute the time at which the next callback should be called
+        if np.isfinite(callback_interval):
+            next_callback = (state.t % callback_interval)
+            if abs(next_callback) > 1e-12:  # Call cbck if due in first step
+                next_callback = callback_interval - next_callback
+        else:
+            next_callback = np.inf # Do not call callback
+
+        # Loop until the end of the simulation period is reached
         while T > 0:
-            cur_dt = min(T, dt)  # Step exactly to T
+            # Periodically call the callback
+            if next_callback <= 0.0:
+                if callback(state) is False:
+                    return state
+                next_callback += callback_interval
+
+            # Step exactly to T, or to the next callback interval
+            cur_dt = min(T, dt, next_callback)
+
+            # Perform a single dynamics step
             state = self.step(state, cur_dt)
+
+            # Keep track of passing time
             T -= cur_dt
+            next_callback -= cur_dt
+
         return state
 
     def step(self, state=None, dt=1e-2):
