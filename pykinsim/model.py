@@ -57,22 +57,6 @@ class Labeled:
             return "<{label} ({class} @ 0x{addr:02x})>".format(**fmt)
 
 
-class ObjectMapEntry:
-    """
-    PyKinSim creates a deep copy of the kinematic chain passed to the
-    "Simulator" object. In order to be able to reference data by the original
-    object handles, we need to maintain a map between the original objects and
-    the objects in the deep copy. The ObjectMapEntry class is a named tuple that
-    conveniently stores a single such association.
-    """
-    def __init__(self, original, clone):
-        self.original = original
-        self.clone = clone
-
-    def __repr__(self):
-        return "<{} --> {}>".format(repr(self.original), repr(self.clone))
-
-
 class Chain(Labeled):
     """
     The Chain object is simply a container of Objectinstances. This class, and
@@ -172,44 +156,6 @@ class Chain(Labeled):
             obj.coerce()
 
         return self
-
-    def copy(self, object_map):
-        """
-        Creates a deep copy of this chain object and stores associations between
-        new and old objects in the object_map dictionary
-        """
-        def deepcopy(obj, object_map):
-            if isinstance(obj, (sp.Symbol, sp.MatrixSymbol, sp.Function)):
-                return obj
-            elif isinstance(obj, list):
-                return [deepcopy(value, object_map) for value in obj]
-            elif isinstance(obj, dict):
-                return {key: value for key, value in obj.items()}
-            elif isinstance(obj, set):
-                return {deepcopy(value, object_map) for value in obj}
-            elif hasattr(obj, "__dict__"):
-                # If the object with this id has already been copied, return the
-                # clone
-                if obj in object_map:
-                    return object_map[obj].clone
-
-                # Otherwise create a clone of the object
-                clone = obj.__class__.__new__(obj.__class__)
-
-                # Store a reference at the original/clone in the object map
-                object_map[obj] = object_map[clone] = \
-                        ObjectMapEntry(original=obj, clone=clone)
-
-                # Copy all attributes stored in the object
-                for key, value in obj.__dict__.items():
-                    setattr(clone, key, deepcopy(value, object_map))
-                return clone
-            elif hasattr(obj, "copy") and callable(obj.copy):
-                return obj.copy()
-            else:
-                return obj
-
-        return deepcopy(self, object_map)
 
     def tree(self):
         """

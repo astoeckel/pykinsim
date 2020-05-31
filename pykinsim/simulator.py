@@ -242,7 +242,8 @@ class Simulator:
         """
         Creates a new Simulator object for the given chain. The "root" object
         is the object relative to which the location of all other objects is
-        computed.
+        computed. If no root is given, a suitable root will automatically be
+        selected.
 
         As a first step, the Simulator object will validate all parameters set
         on the kinematics objects; i.e., it will ensure that all objects have
@@ -252,8 +253,11 @@ class Simulator:
         Note
         ====
 
+        The `chain` object will be mutated by the `Simulator` constructor.
         Once the simulator object has been created, changes to the original
-        Chain object do not affect the simulation.
+        `chain` object are likely to not affect the simulation. A good practice
+        is to construct a single `Chain` instance for each `Simulator` instance,
+        and to not change the `Chain` once the `Simulator` has been created.
 
         Parameters
         ==========
@@ -302,8 +306,8 @@ class Simulator:
         self._g = g
 
         # Copy and validate the "chain" object
-        self.object_map = {}  # External to internal object map
-        self.chain = chain.copy(self.object_map).coerce()
+        self.chain = chain.coerce()
+        self.root = root
 
         # Count the number of joints and constraints
         self._n_joints = sum(1 for _ in self.joints)
@@ -313,7 +317,6 @@ class Simulator:
         self._joint_idx_map = {}
         for i, joint in enumerate(self.joints):
             self._joint_idx_map[joint] = i
-            self._joint_idx_map[self.object_map[joint].original] = i
 
         # Construct the symbols used for evaluating certain expressions
         # symbolically
@@ -327,13 +330,11 @@ class Simulator:
         # is aligned with the global coordinate stytem
         self._loc = np.zeros(3)
         self._rot = np.zeros(3)
-        if not root is None:
-            # Translate the user-provided root reference to a local object
-            self._root = self.object_map[root].clone
-
+        if self.root is None:
+            self.root = self._tree_root
+        else:
             # Compute the forward kinematics for that root element
-            T = self.kinematics(state=self.initial_state(),
-                                use_external_objects=False)[self._root]
+            T = self.kinematics(state=self.initial_state())[self.root]
 
             # Translate the coordinate system such that the root element is
             # in the center
@@ -344,8 +345,6 @@ class Simulator:
             # global coordinate frame.
             psi, theta, phi = rot_to_euler(T[:3, :3])
             self._rot = (-psi, -theta, -phi)
-        else:
-            self._root = self._tree_root
 
         # Apply the user-specified transformation
         self._loc += loc
@@ -353,8 +352,7 @@ class Simulator:
 
         try:
             # Compile the kinematics into a function
-            self._kinematics = self.kinematics(return_function=True,
-                                            use_external_objects=False)
+            self._kinematics = self.kinematics(return_function=True)
 
             # Compile the dynamics into a function (aka the dynamics descriptor)
             self._dynamics = self.dynamics(return_function=True)
@@ -505,8 +503,7 @@ class Simulator:
 
     def kinematics(self,
                    state=None,
-                   return_function=False,
-                   use_external_objects=True):
+                   return_function=False):
         """
         Computes the location and orientation of either all point objects or
         the specified point object. If no state (or a symbolic state) is given,
@@ -535,13 +532,6 @@ class Simulator:
 
                 Note that thestate argument "state" must be set to None if
                 "return_function" is set to True.
-
-        use_external_objects:
-                If True, the returned object-to-transformation-map will use the
-                original user-provided object references (which is what a user
-                of the library most likely wants). Setting this to False will
-                return internal object references, instead, which is what
-                internal users of this function want.
         """
 
         if (not state is None) and return_function:
@@ -589,18 +579,6 @@ class Simulator:
                 T[link.tar] = (cur, ltrafo) if return_function else ltrafo
                 queue.append(link.tar)
 
-        # Translate the object references
-        omap = self.object_map
-        if use_external_objects:
-            res = {}
-            if return_function:
-                for key, (parent, value) in T.items():
-                    res[omap[key].original] = (omap[parent].original, value)
-            else:
-                for key, value in T.items():
-                    res[omap[key].original] = value
-            return res
-
         # We're done here if we were to solve this symbolically
         if not return_function:
             return T
@@ -610,10 +588,7 @@ class Simulator:
         # referenced as a parent
         S = self.symbols  # Alias
         args = S.var_origin + S.var_theta  # Arguments passed to the functions
-        if use_external_objects:
-            leafs = set(map(lambda x: omap[x].original, self.point_objects))
-        else:
-            leafs = set(self.point_objects)
+        leafs = set(self.point_objects)
         for key, (parent, value) in T.items():
             # The parent cannot be a leaf
             if parent in leafs:
@@ -674,7 +649,7 @@ class Simulator:
             g = self.symbols.g
 
         # Symbolically compute the forward kinematics
-        trafos = self.kinematics(use_external_objects=False)
+        trafos = self.kinematics()
 
         # Fetch the symbol representing time
         t = self.symbols.t
@@ -703,11 +678,10 @@ class Simulator:
         """
 
         # Symbolically compute the forward kinematics
-        trafos = self.kinematics(use_external_objects=False)
+        trafos = self.kinematics()
 
         # Compute the forward kinematics for the initial state
-        trafos_init = self.kinematics(state=self.initial_state(),
-                                      use_external_objects=False)
+        trafos_init = self.kinematics(state=self.initial_state())
 
         # For each fixture, add a set of constraints regarding its location
         Cs = []
