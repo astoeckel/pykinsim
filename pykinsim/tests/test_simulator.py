@@ -187,7 +187,17 @@ def test_simulator_dynamics_symbolic():
     theta = sim.symbols.var_theta[0]
 
     assert sim.symbols.var_ddtheta[0] in dynamics
-    ddtheta =  dynamics[sim.symbols.var_ddtheta[0]]
+    ddtheta = dynamics[sim.symbols.var_ddtheta[0]]
 
     assert sp.simplify(9.81 * sp.cos(theta) - ddtheta) == 0
+
+
+def test_simulator_falling_point_mass():
+    with pks.Chain() as chain:
+        m1 = pks.Mass(m=1.0)
+
+    with pks.Simulator(chain) as sim:
+        state = sim.run(1.0)
+
+    assert np.abs(state.loc[2] + (9.81 / 2)) < 1e-12
 

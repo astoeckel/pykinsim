@@ -905,14 +905,17 @@ class Simulator:
 
         # Compute the variable subtitutions. These are Lagrange multipliers or
         # accelerations that were determined to have a fixed value
-        subs = f_subs(*x)
+        subs = np.array(f_subs(*x), dtype=np.float64).reshape(-1, 1)
 
         # Solve for the accelerations and Lagrange multipliers
-        soln = np.linalg.lstsq(A, b, rcond=1e-6)[0]
+        if A.size > 0:
+            soln = T @ np.linalg.lstsq(A, b, rcond=1e-6)[0]
+        else:
+            soln = np.zeros((len(subs), 1))
 
         # The resulting accelerations are the sum of the substitutions and the
         # the solution to the linear system computed above.
-        ddx = (T @ soln + subs)[:, 0]
+        ddx = (soln + subs)[:, 0]
 
         # Return the state update vector
         return np.concatenate((x[i1:i2], ddx[j0:j1]))
