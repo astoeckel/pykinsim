@@ -30,10 +30,14 @@ def test_state():
         b: 1,
         c: 2,
     }
-    state = State(joint_idx_map)
+    joint_torque_idx_map = {
+        c: 0
+    }
+    state = State(joint_idx_map, joint_torque_idx_map)
 
     assert len(state) == 3
     assert all(map(lambda x: x == 0.0, state))
+    assert len(state.torques) == 1
 
     for i in range(3):
         state[i] = i
@@ -41,6 +45,11 @@ def test_state():
     assert state[a] == 0
     assert state[b] == 1
     assert state[c] == 2
+
+    assert state.torques[c] == 0
+    state.torques[c] = 5
+    assert state.torques[c] == 5
+
 
 
 def test_simulator_error_disconnected_components_1():

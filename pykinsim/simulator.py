@@ -28,13 +28,12 @@ logger = logging.getLogger(__name__)
 # Default gravity vector
 DEFAULT_GRAVITY = (0.0, 0.0, 9.81)
 
-
 class Symbols:
     """
     Class collecting all the symbols used to represent the kinematics and
     dynamics of the system.
     """
-    def __init__(self, n_joints, n_cstrs):
+    def __init__(self, n_joints, n_cstrs, n_torques):
         # Handy aliases
         n, m = n_joints, n_cstrs
 
@@ -75,6 +74,11 @@ class Symbols:
         for i in range(m):
             self.lambda_[i] = sp.Symbol("λ{}".format(i + 1))
 
+        # Torques
+        self.torques = [None] * n_torques
+        for i in range(n_torques):
+            self.torques[i] = sp.Symbol("τ{}".format(i + 1))
+
         # Gravity vector
         self.gx, self.gy, self.gz = sp.symbols("gx gy gz")
         self.g = sp.Matrix([self.gx, self.gy, self.gz])
@@ -109,6 +113,42 @@ class Symbols:
         return expr
 
 
+class ExternalTorques:
+    """
+    Class used internally by "State" to provide a map for writing external
+    torques.
+    """
+
+    def __init__(self, external_torques, joint_torque_idx_map):
+        self._external_torques = external_torques
+        self._joint_torque_idx_map = joint_torque_idx_map
+
+        # Determine the total number of joints with an external torque
+        if len(joint_torque_idx_map) == 0:
+            self._n_torques = 0
+        else:
+            self._n_torques = max(joint_torque_idx_map.values()) + 1
+
+    def idx(self, key):
+        return self._joint_torque_idx_map[key]
+
+    def _check_key(self, key):
+        if isinstance(key, (int, slice)) or hasattr(key, '__len__'):
+            return key
+        else:
+            return self.idx(key)
+
+    def __getitem__(self, key):
+        return self._external_torques[self._check_key(key)]
+
+    def __setitem__(self, key, value):
+        self._external_torques[self._check_key(key)] = value
+
+    def __len__(self):
+        return self._n_torques
+
+
+
 class State:
     """
     The State class describes the state of the model. In particular, this class
@@ -118,13 +158,22 @@ class State:
     Do not manually construct State instances, use the Simulator.initial_state()
     member function instead.
     """
-    def __init__(self, joint_idx_map, symbolic=False):
+    def __init__(self, joint_idx_map, joint_torque_idx_map, symbolic=False):
         # Copy the given arguments
         self._joint_idx_map = joint_idx_map
+        self._joint_torque_idx_map = joint_torque_idx_map
+
+        # Determine the total number of joints
         if len(joint_idx_map) == 0:
             self._n_joints = 0
         else:
             self._n_joints = max(joint_idx_map.values()) + 1
+
+        # Determine the total number of joints with an external torque
+        if len(joint_torque_idx_map) == 0:
+            self._n_torques = 0
+        else:
+            self._n_torques = max(joint_torque_idx_map.values()) + 1
 
         # State variables keeping track of the current time and the current step
         self._t = 0.0
@@ -145,6 +194,10 @@ class State:
         # Create arrays holding the joint states and velocities
         self._joint_states = zeros(self._n_joints)
         self._joint_velocities = zeros(self._n_joints)
+
+        # Create array holding the external torques applied to the joints
+        self._external_torques = zeros(self._n_torques)
+        self._external_torques_obj = ExternalTorques(self._external_torques, self._joint_torque_idx_map)
 
     @property
     def t(self):
@@ -196,6 +249,10 @@ class State:
         return self._joint_velocities
 
     @property
+    def torques(self):
+        return self._external_torques_obj
+
+    @property
     def vec(self):
         """
         Returns a vectorised version of the state, including both the static
@@ -204,13 +261,14 @@ class State:
         "Simulator.state_differential()".
         """
         return np.concatenate((self._loc, self._joint_states, self._dloc,
-                               self._joint_velocities))
+                               self._joint_velocities, self._external_torques))
 
     @property
     def static_vec(self):
         """
         Returns a vectorised version of the static state, i.e., only the
-        origin and the joint states. This does *not* include the velocities.
+        origin and the joint states. This does *not* include the velocities or
+        torques.
         The resulting vector is passed to the kinematics function returned
         by "Simulator.kinematics()".
         """
@@ -218,12 +276,13 @@ class State:
 
     @vec.setter
     def vec(self, x):
-        n = self._n_joints
-        i0, i1, i2, i3, i4 = 0, 3, 3 + n, 6 + n, 6 + 2 * n
+        n, m = self._n_joints, self._n_torques
+        i0, i1, i2, i3, i4, i5 = 0, 3, 3 + n, 6 + n, 6 + 2 * n, 6 + 2 * n + m
         self._loc[...] = x[i0:i1]
         self._joint_states[...] = x[i1:i2]
         self._dloc[...] = x[i2:i3]
-        self._joint_velocities = x[i3:i4]
+        self._joint_velocities[...] = x[i3:i4]
+        self._external_torques[...] = x[i4:i5]
 
 
 class Simulator:
@@ -305,19 +364,32 @@ class Simulator:
         self.object_map = {}  # External to internal object map
         self.chain = chain.copy(self.object_map).coerce()
 
-        # Count the number of joints and constraints
-        self._n_joints = sum(1 for _ in self.joints)
-        self._n_cstrs = sum(len(fix.axes) for fix in self.fixtures)
-
-        # Build the _joint_idx_map assigning an index to each joint
+        # Build the _joint_idx_map assigning an index to each joint; furthermore
+        # assign an index to each joint with an external torque
         self._joint_idx_map = {}
-        for i, joint in enumerate(self.joints):
+        self._joint_torque_idx_map = {}
+        i, ti = 0, 0
+        for joint in self.joints:
+            # Add the joint to the joint to index map
             self._joint_idx_map[joint] = i
             self._joint_idx_map[self.object_map[joint].original] = i
+            i = i + 1
+
+            # If the joint has an external joint, add it to the joint torque
+            # index map
+            if joint.torque is External:
+                self._joint_torque_idx_map[joint] = ti
+                self._joint_torque_idx_map[self.object_map[joint].original] = ti
+                ti = ti + 1
+
+        # Count the number of joints, constraints, and torques
+        self._n_joints = sum(1 for _ in self.joints)
+        self._n_cstrs = sum(len(fix.axes) for fix in self.fixtures)
+        self._n_torques = ti
 
         # Construct the symbols used for evaluating certain expressions
         # symbolically
-        self._symbols = Symbols(self._n_joints, self._n_cstrs)
+        self._symbols = Symbols(self._n_joints, self._n_cstrs, self._n_torques)
 
         # Build the spanning tree
         self._tree, self._tree_root = self.chain.tree()
@@ -354,7 +426,7 @@ class Simulator:
         try:
             # Compile the kinematics into a function
             self._kinematics = self.kinematics(return_function=True,
-                                            use_external_objects=False)
+                                               use_external_objects=False)
 
             # Compile the dynamics into a function (aka the dynamics descriptor)
             self._dynamics = self.dynamics(return_function=True)
@@ -377,6 +449,10 @@ class Simulator:
 
     @property
     def joints(self):
+        return filter(lambda x: isinstance(x, Joint), self.chain._objs)
+
+    @property
+    def joints_with_external_torque(self):
         return filter(lambda x: isinstance(x, Joint), self.chain._objs)
 
     @property
@@ -411,7 +487,7 @@ class Simulator:
         """
 
         # Create the state object
-        state = State(self._joint_idx_map)
+        state = State(self._joint_idx_map, self._joint_torque_idx_map)
 
         # Copy the initial joint angles
         for joint in self.joints:
@@ -432,7 +508,7 @@ class Simulator:
         """
 
         # Create the state object
-        state = State(self._joint_idx_map, symbolic=True)
+        state = State(self._joint_idx_map, self._joint_torque_idx_map, symbolic=True)
 
         # Set the initial joint angles
         for i in range(len(state)):
@@ -449,7 +525,7 @@ class Simulator:
 
         return state
 
-    def run(self, T, state=None, dt=1e-3):
+    def run(self, T, state=None, torques=None, dt=1e-2):
         """
         Advances the simulation up to T in timesteps smaller or equal to dt.
 
@@ -458,9 +534,9 @@ class Simulator:
 
         T:      The time in seconds to run the simulation for.
         state:  The state object containing the current joint angles and
-                velocities. If no state object is given (i.e., this is set to
-                None), creates a new State object. Note that the State object
-                must not be symbolic.
+                velocities, as well as user-defined external torques. If no
+                state object is given (i.e., this is set to None), creates a new
+                State object. Note that the State object must not be symbolic.
         dt:     The maximum timestep used in the evaluation.
         """
         while T > 0:
@@ -760,6 +836,14 @@ class Simulator:
         # differentiating over when computing the Lagrange equations
         vars_ = [*S.origin, *S.theta]
 
+        # Collect all torques
+        torques = [0, 0, 0]
+        for joint in self.joints:
+            if joint.torque is External:
+                torques.append(S.torques[self._joint_torque_idx_map[joint]])
+            else:
+                torques.append(joint.torque)
+
         # Collect all target variables; these are the variables we're trying
         # to solve for
         tars = [S.subs(x) for x in ([Dt2(var) for var in vars_] + S.lambda_)]
@@ -771,8 +855,8 @@ class Simulator:
         # "eqns" list corresponds to an equation of the form "x = 0".
         eqns = [
             sp.expand(S.subs(x)) for x in
-            ([Dx(L, var) - Dt(Dx(L, Dt(var))) + Dx(C, var)
-              for var in vars_] + Cs + [Dt2(C) for C in Cs])
+            ([Dx(L, var) - Dt(Dx(L, Dt(var))) + Dx(C, var) + torques[i]
+              for i, var in enumerate(vars_)] + Cs + [Dt2(C) for C in Cs])
         ]
 
         # The resulting system is linear in the accelerations and Lagrange
@@ -870,13 +954,13 @@ class Simulator:
         # If the user did not want the symbolic solution, just turn the matrices
         # into callable functions
         if return_function:
-            args = S.var_origin + S.var_theta + S.var_dorigin + S.var_dtheta
+            args = S.var_origin + S.var_theta + S.var_dorigin + S.var_dtheta + S.torques
             f_A = sp.lambdify(args, A, modules=["numpy"])
             f_b = sp.lambdify(args, b, modules=["numpy"])
             f_subs = sp.lambdify(args,
                                  [0.0 if (x is None) else x for x in subs],
                                  modules=["numpy"])
-            return f_A, f_b, f_subs, T
+            return f_A, f_b, f_subs, T, self._n_joints, self._n_torques
 
         # Solve the linear system symbolically
         symbols = [tars[i] for i in keep_col_idcs]
@@ -918,12 +1002,17 @@ class Simulator:
         """
 
         # Unpack the dynamics descriptor
-        f_A, f_b, f_subs, T = dyns
+        f_A, f_b, f_subs, T, n_joints, n_torques = dyns
 
         # Compute some handy indices used below
-        n = len(x) // 2 - 3
-        i0, i1, i2 = 0, 3 + n, 6 + 2 * n  # i1:i2 --> velocities in x
-        j0, j1 = 0, 3 + n  # j0:j1 --> accls. in the lin. sys.
+        assert len(x) == 2 * (3 + n_joints) + n_torques
+        n, m = n_joints, n_torques
+
+        # i0:i1 --> initial coordinates
+        # i1:i2 --> velocities in x
+        # j0:j1 --> accls. in the linear system
+        i0, i1, i2 = 0, 3 + n, 6 + 2 * n
+        j0, j1 = 0, 3 + n
 
         # Compute the linear system for the given state
         A = f_A(*x)
@@ -941,7 +1030,7 @@ class Simulator:
         ddx = (T @ soln + subs)[:, 0]
 
         # Return the state update vector
-        return np.concatenate((x[i1:i2], ddx[j0:j1]))
+        return np.concatenate((x[i1:i2], ddx[j0:j1], np.zeros(n_torques)))
 
     ###########################################################################
     # Visualization                                                           #
