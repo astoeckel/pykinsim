@@ -23,7 +23,7 @@ setup(
     name='pykinsim',
     packages=find_packages(),
     package_data={},
-    version='0.1.0',
+    version='0.2.0',
     author='Andreas Stöckel',
     author_email='astoecke@uwaterloo.ca',
     description='Python Kinematic Chain Simulator',
@@ -40,7 +40,7 @@ setup(
     ],
     install_requires=[
         "numpy>=1.16.3",
-	"sympy>=1.6",
+        "sympy>=1.6",
     ],
 )
 

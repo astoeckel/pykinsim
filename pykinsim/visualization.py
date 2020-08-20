@@ -125,7 +125,8 @@ def animate(sim, fps=30.0, dt=1e-2, T=1000.0, callback=None):
     def animate(i):
         # Call the callback if one is given
         if not callback is None:
-            callback(state, dt)
+            if callback(state, dt) is False:
+                return state
 
         # Run the actual simulation
         t0 = time.process_time()
@@ -151,4 +152,4 @@ def animate(sim, fps=30.0, dt=1e-2, T=1000.0, callback=None):
     # Show the window
     plt.show()
     print()
-
+    return state

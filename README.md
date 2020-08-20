@@ -13,7 +13,9 @@ kinematic chains.
 
 ## Example
 
-A single code snippet is often worth more than a thousand words! Hence, the following example shows how to describe, simulate, and visualize a simple pendulum using *PyKinSim*.
+A single code snippet is often worth more than a thousand words! Hence, the
+following example shows how to describe, simulate, and visualize a simple
+pendulum using *PyKinSim*.
 
 ```python
 import pykinsim as pks
@@ -39,9 +41,13 @@ with pks.Simulator(chain, root=f1) as sim:
         vis.fig.savefig("pendulum_{}.svg".format(i), bbox_inches="tight", transparent=True)
 ```
 
-Executing this will roughly result in the picture displayed in the header above (the individual plots were combined for clarity). The rotational joint is depicted as a blue circle, the mass as a red square. The coloured lines correspond to the local (3D) coordinate system of each object.
+Executing this will roughly result in the picture displayed in the header above
+(the individual plots were combined for clarity). The rotational joint is
+depicted as a blue circle, the mass as a red square. The coloured lines
+correspond to the local (3D) coordinate system of each object.
 
-The code snippet above should be enough to get you started. See the `examples` folder for more models.
+The code snippet above should be enough to get you started. See the `examples`
+folder for more models.
 
 ## Features
 

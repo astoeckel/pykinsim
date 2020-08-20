@@ -301,7 +301,8 @@ class Simulator:
         """
         Creates a new Simulator object for the given chain. The "root" object
         is the object relative to which the location of all other objects is
-        computed.
+        computed. If no root is given, a suitable root will automatically be
+        selected.
 
         As a first step, the Simulator object will validate all parameters set
         on the kinematics objects; i.e., it will ensure that all objects have
@@ -311,8 +312,11 @@ class Simulator:
         Note
         ====
 
+        The `chain` object will be mutated by the `Simulator` constructor.
         Once the simulator object has been created, changes to the original
-        Chain object do not affect the simulation.
+        `chain` object are likely to not affect the simulation. A good practice
+        is to construct a single `Chain` instance for each `Simulator` instance,
+        and to not change the `Chain` once the `Simulator` has been created.
 
         Parameters
         ==========
@@ -361,8 +365,8 @@ class Simulator:
         self._g = g
 
         # Copy and validate the "chain" object
-        self.object_map = {}  # External to internal object map
-        self.chain = chain.copy(self.object_map).coerce()
+        self.chain = chain.coerce()
+        self.root = root
 
         # Build the _joint_idx_map assigning an index to each joint; furthermore
         # assign an index to each joint with an external torque
@@ -372,14 +376,12 @@ class Simulator:
         for joint in self.joints:
             # Add the joint to the joint to index map
             self._joint_idx_map[joint] = i
-            self._joint_idx_map[self.object_map[joint].original] = i
             i = i + 1
 
             # If the joint has an external joint, add it to the joint torque
             # index map
             if joint.torque is External:
                 self._joint_torque_idx_map[joint] = ti
-                self._joint_torque_idx_map[self.object_map[joint].original] = ti
                 ti = ti + 1
 
         # Count the number of joints, constraints, and torques
@@ -399,13 +401,11 @@ class Simulator:
         # is aligned with the global coordinate stytem
         self._loc = np.zeros(3)
         self._rot = np.zeros(3)
-        if not root is None:
-            # Translate the user-provided root reference to a local object
-            self._root = self.object_map[root].clone
-
+        if self.root is None:
+            self.root = self._tree_root
+        else:
             # Compute the forward kinematics for that root element
-            T = self.kinematics(state=self.initial_state(),
-                                use_external_objects=False)[self._root]
+            T = self.kinematics(state=self.initial_state())[self.root]
 
             # Translate the coordinate system such that the root element is
             # in the center
@@ -416,8 +416,6 @@ class Simulator:
             # global coordinate frame.
             psi, theta, phi = rot_to_euler(T[:3, :3])
             self._rot = (-psi, -theta, -phi)
-        else:
-            self._root = self._tree_root
 
         # Apply the user-specified transformation
         self._loc += loc
@@ -425,8 +423,7 @@ class Simulator:
 
         try:
             # Compile the kinematics into a function
-            self._kinematics = self.kinematics(return_function=True,
-                                               use_external_objects=False)
+            self._kinematics = self.kinematics(return_function=True)
 
             # Compile the dynamics into a function (aka the dynamics descriptor)
             self._dynamics = self.dynamics(return_function=True)
@@ -525,7 +522,7 @@ class Simulator:
 
         return state
 
-    def run(self, T, state=None, torques=None, dt=1e-2):
+    def run(self, T, state=None, dt=1e-2, callback=None, callback_interval=None):
         """
         Advances the simulation up to T in timesteps smaller or equal to dt.
 
@@ -537,12 +534,61 @@ class Simulator:
                 velocities, as well as user-defined external torques. If no
                 state object is given (i.e., this is set to None), creates a new
                 State object. Note that the State object must not be symbolic.
-        dt:     The maximum timestep used in the evaluation.
+        dt:     The maximum timestep used in the evaluation. This value must be
+                strictly positive.
+        callback: If given, is called every "callback_interval" seconds of
+                simulation time. The function receives two parameters: the
+                current time "t", as well as the current state. The function may
+                return the boolean False to abort the simulation early.
+        callback_interval: The interval in seconds within which the callback
+                function is called. If "None", this is set to dt, i.e., the
+                callback is called every timestep. Note that the times at which
+                the callback is called are aligned with the global simulation
+                time (i.e., if callback_interval is 1s, the callback will be
+                called at state.t = 0.0, state.t = 1.0, state.t = 2.0, etc.).
+                This value must be greater than or equal to dt.
         """
+        # Use the initial state if no state is given
+        if state is None:
+            state = self.initial_state()
+
+        # Make sure "dt" has a sane value to prevent infinite loops.
+        if dt <= 0.0:
+            raise ValueError("dt must be strictly positive.")
+
+        # Make sure "callback_interval" has a sane value. Set to infinity if
+        # there is no callback.
+        if callback_interval is None:
+            callback_interval = dt if callback else np.inf
+        if callback_interval < dt:
+            raise ValueError("callback_interval must be greater than or equal to the timestep dt.")
+
+        # Compute the time at which the next callback should be called
+        if np.isfinite(callback_interval):
+            next_callback = (state.t % callback_interval)
+            if abs(next_callback) > 1e-12:  # Call cbck if due in first step
+                next_callback = callback_interval - next_callback
+        else:
+            next_callback = np.inf # Do not call callback
+
+        # Loop until the end of the simulation period is reached
         while T > 0:
-            cur_dt = min(T, dt)  # Step exactly to T
+            # Periodically call the callback
+            if next_callback <= 0.0:
+                if callback(state, dt) is False:
+                    return state
+                next_callback += callback_interval
+
+            # Step exactly to T, or to the next callback interval
+            cur_dt = min(T, dt, next_callback)
+
+            # Perform a single dynamics step
             state = self.step(state, cur_dt)
+
+            # Keep track of passing time
             T -= cur_dt
+            next_callback -= cur_dt
+
         return state
 
     def step(self, state=None, dt=1e-2):
@@ -581,8 +627,7 @@ class Simulator:
 
     def kinematics(self,
                    state=None,
-                   return_function=False,
-                   use_external_objects=True):
+                   return_function=False):
         """
         Computes the location and orientation of either all point objects or
         the specified point object. If no state (or a symbolic state) is given,
@@ -611,13 +656,6 @@ class Simulator:
 
                 Note that thestate argument "state" must be set to None if
                 "return_function" is set to True.
-
-        use_external_objects:
-                If True, the returned object-to-transformation-map will use the
-                original user-provided object references (which is what a user
-                of the library most likely wants). Setting this to False will
-                return internal object references, instead, which is what
-                internal users of this function want.
         """
 
         if (not state is None) and return_function:
@@ -665,18 +703,6 @@ class Simulator:
                 T[link.tar] = (cur, ltrafo) if return_function else ltrafo
                 queue.append(link.tar)
 
-        # Translate the object references
-        omap = self.object_map
-        if use_external_objects:
-            res = {}
-            if return_function:
-                for key, (parent, value) in T.items():
-                    res[omap[key].original] = (omap[parent].original, value)
-            else:
-                for key, value in T.items():
-                    res[omap[key].original] = value
-            return res
-
         # We're done here if we were to solve this symbolically
         if not return_function:
             return T
@@ -686,10 +712,7 @@ class Simulator:
         # referenced as a parent
         S = self.symbols  # Alias
         args = S.var_origin + S.var_theta  # Arguments passed to the functions
-        if use_external_objects:
-            leafs = set(map(lambda x: omap[x].original, self.point_objects))
-        else:
-            leafs = set(self.point_objects)
+        leafs = set(self.point_objects)
         for key, (parent, value) in T.items():
             # The parent cannot be a leaf
             if parent in leafs:
@@ -750,7 +773,7 @@ class Simulator:
             g = self.symbols.g
 
         # Symbolically compute the forward kinematics
-        trafos = self.kinematics(use_external_objects=False)
+        trafos = self.kinematics()
 
         # Fetch the symbol representing time
         t = self.symbols.t
@@ -779,11 +802,10 @@ class Simulator:
         """
 
         # Symbolically compute the forward kinematics
-        trafos = self.kinematics(use_external_objects=False)
+        trafos = self.kinematics()
 
         # Compute the forward kinematics for the initial state
-        trafos_init = self.kinematics(state=self.initial_state(),
-                                      use_external_objects=False)
+        trafos_init = self.kinematics(state=self.initial_state())
 
         # For each fixture, add a set of constraints regarding its location
         Cs = []
@@ -1020,14 +1042,17 @@ class Simulator:
 
         # Compute the variable subtitutions. These are Lagrange multipliers or
         # accelerations that were determined to have a fixed value
-        subs = f_subs(*x)
+        subs = np.array(f_subs(*x), dtype=np.float64).reshape(-1, 1)
 
         # Solve for the accelerations and Lagrange multipliers
-        soln = np.linalg.lstsq(A, b, rcond=1e-6)[0]
+        if A.size > 0:
+            soln = T @ np.linalg.lstsq(A, b, rcond=1e-6)[0]
+        else:
+            soln = np.zeros((len(subs), 1))
 
         # The resulting accelerations are the sum of the substitutions and the
         # the solution to the linear system computed above.
-        ddx = (T @ soln + subs)[:, 0]
+        ddx = (soln + subs)[:, 0]
 
         # Return the state update vector
         return np.concatenate((x[i1:i2], ddx[j0:j1], np.zeros(n_torques)))
