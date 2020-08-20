@@ -51,7 +51,7 @@ folder for more models.
 
 ## Features
 
-*PyKinSim* is designed to be fairly minimal, with a simple API. It focuses on rigid connections between point masses with rotational
+*PyKinSim* is designed to be fairly minimal, with a simple API. It focuses on rigid connections between point masses with rotational joints.
 
 * **Rigid body simulation using Lagrangian mechanics**  
   *PyKinSim* is using Lagrangian mechanics to accurately describe the motion of the objects in the system under the influence of gravity.
@@ -60,6 +60,8 @@ folder for more models.
 * **Four object types**  
   * *Point objects:*  `Joint` (rotational joints around a 3D axis), `Fixture` (a point with no or constrained movement), `Mass` (a point mass)
   * *Links:* `Link` (connects two point objects)
+* **External torques**
+  * External and constant torques can be applied to `Joint` objects while the simulation is running.
 
 ## Installation and Dependencies
 

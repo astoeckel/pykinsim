@@ -13,6 +13,7 @@
 #
 #   You should have received a copy of the GNU General Public License
 #   along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 """
 This file contains all the data objects holding information about the model
 built by the user. These objects are merely data containers and do not contain
