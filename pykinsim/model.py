@@ -33,6 +33,11 @@ from collections import deque
 # "with" magic of the Chain object
 import threading
 _thread_local = threading.local()
+"""
+When used as a value for "torque" in the Joint constructor, signifies that the
+torque will be supplied by the user in the run/step function.
+"""
+External = object()
 
 
 class Labeled:
@@ -443,7 +448,12 @@ class Joint(PointObject):
     classes, a joint itself does not specify which objects are connected to it,
     it merely acts as a connection site for a Link.
     """
-    def __init__(self, axis="y", theta=0.0, label=None, parent=None):
+    def __init__(self,
+                 axis="y",
+                 theta=0.0,
+                 torque=0.0,
+                 label=None,
+                 parent=None):
         """
         Creates a new Joint object.
 
@@ -452,6 +462,12 @@ class Joint(PointObject):
         theta:  Initial rotation angle. An angle of zero means that a link
                 originating from this joint will be continued relative to the
                 local coordinate system of the joint without any change.
+        torque: Describes an (external) torque that is being applied to this
+                joint. When set to `pykinsim.External`, the torque for this
+                joint may be specified in the run/step functions. If a constant
+                number is given, a constant torque is applied to the joint.
+                Setting "torque" to None is equivalent to a constant torque of
+                zero.
         label:  The label assigned to the joint object. If None, pykinsim tries
                 to automagically™ deduce a label from the variable names used in
                 the code.
@@ -465,6 +481,7 @@ class Joint(PointObject):
         # Copy the provided parameters
         self.axis = axis
         self.theta = theta
+        self.torque = torque
 
     def trafo(self, theta):
         if self.axis == "x":
@@ -489,6 +506,12 @@ class Joint(PointObject):
 
         # Make sure theta is valid
         self.theta = scalar(self.theta)
+
+        # Make sure torque is either a special value or a number
+        if self.torque is External:
+            pass  # Nothing to do
+        else:
+            self.torque = scalar(self.torque)
 
 
 class Mass(PointObject):

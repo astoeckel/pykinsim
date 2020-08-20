@@ -24,6 +24,7 @@ from .model import (
     Joint,
     Mass,
     Fixture,
+    External,
 )
 
 from .simulator import (
