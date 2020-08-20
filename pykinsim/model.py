@@ -27,7 +27,7 @@ from .geometry import scalar, trans, rot_x, rot_y, rot_z
 
 import sympy as sp
 import re
-from collections import deque
+from collections import deque, OrderedDict
 
 # Initialize thread-local storage -- this is needed to properly implement the
 # "with" magic of the Chain object
@@ -130,8 +130,9 @@ class Chain(Labeled):
         # Copy the given arguments
         self.label = label
 
-        # Create the object container
-        self._objs = set()
+        # Create the object container; explicitly use an OrderedDict since
+        # we want to maintain the object insertion order
+        self._objs = OrderedDict()
 
     def __enter__(self):
         if not hasattr(_thread_local, 'active_chain'):
@@ -188,8 +189,17 @@ class Chain(Labeled):
                 return obj
             elif isinstance(obj, list):
                 return [deepcopy(value, object_map) for value in obj]
+            elif isinstance(obj, OrderedDict):
+                res = OrderedDict()
+                for key, value in obj.items():
+                    res[deepcopy(key,
+                                 object_map)] = deepcopy(value, object_map)
+                return res
             elif isinstance(obj, dict):
-                return {key: value for key, value in obj.items()}
+                return {
+                    deepcopy(key, object_map): deepcopy(value, object_map)
+                    for key, value in obj.items()
+                }
             elif isinstance(obj, set):
                 return {deepcopy(value, object_map) for value in obj}
             elif hasattr(obj, "__dict__"):
@@ -334,7 +344,7 @@ class Object(Labeled):
             self.parent = parent
 
         # Add this object the parent object set
-        self.parent._objs.add(self)
+        self.parent._objs[self] = None
 
     def coerce(self):
         """

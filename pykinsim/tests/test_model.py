@@ -46,3 +46,37 @@ def test_tree_forward():
     assert m1 in tree
     assert len(tree[m1]) == 1
     assert tree[m1][0] is l1
+
+def test_joint_index_order_preservation_1():
+    with pks.Chain() as chain:
+        m1 = pks.Mass()
+        j1 = pks.Joint("x")
+        j2 = pks.Joint("y", torque=pks.External)
+        j3 = pks.Joint("z", torque=pks.External)
+        l1 = pks.Link(m1, j1)
+        l2 = pks.Link(m1, j2)
+        l3 = pks.Link(m1, j3)
+
+    with pks.Simulator(chain, m1) as sim:
+        assert sim._joint_idx_map[j1] == 0
+        assert sim._joint_idx_map[j2] == 1
+        assert sim._joint_idx_map[j3] == 2
+        assert sim._joint_torque_idx_map[j2] == 0
+        assert sim._joint_torque_idx_map[j3] == 1
+
+def test_joint_index_order_preservation_2():
+    with pks.Chain() as chain:
+        m1 = pks.Mass()
+        j3 = pks.Joint("z", torque=pks.External)
+        j2 = pks.Joint("y", torque=pks.External)
+        j1 = pks.Joint("x")
+        l1 = pks.Link(m1, j1)
+        l2 = pks.Link(m1, j2)
+        l3 = pks.Link(m1, j3)
+
+    with pks.Simulator(chain, m1) as sim:
+        assert sim._joint_idx_map[j1] == 2
+        assert sim._joint_idx_map[j2] == 1
+        assert sim._joint_idx_map[j3] == 0
+        assert sim._joint_torque_idx_map[j2] == 1
+        assert sim._joint_torque_idx_map[j3] == 0
