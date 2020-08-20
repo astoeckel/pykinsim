@@ -104,7 +104,7 @@ def _visualize_matplotlib(raw, handle, ax, aabb):
 
     return handle
 
-def animate(sim, fps=30.0, dt=1e-2, T=1000.0):
+def animate(sim, fps=30.0, dt=1e-2, T=1000.0, callback=None):
     # Import the required matplotlib packages
     import matplotlib.animation as animation
     import matplotlib.pyplot as plt
@@ -123,6 +123,10 @@ def animate(sim, fps=30.0, dt=1e-2, T=1000.0):
     # Define the "animate" function that needs to be passed to matplotlin
     t_tot = [0.0]
     def animate(i):
+        # Call the callback if one is given
+        if not callback is None:
+            callback(state, dt)
+
         # Run the actual simulation
         t0 = time.process_time()
         sim.run(interval, state, dt=dt)
